@@ -1,0 +1,8 @@
+[package]
+name = "gb-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Game Boy emulation core (no I/O, no external deps)"
+
+[dependencies]
