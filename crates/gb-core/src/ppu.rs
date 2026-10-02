@@ -14,7 +14,7 @@ const LINES: u8 = 154;
 const LINE_PREFIX: u16 = 4;
 const MODE3_START: u16 = 80;
 /// Dot the first line starts at after the LCD is switched on.
-const FIRST_LINE_DOT: u16 = 8;
+const FIRST_LINE_DOT: u16 = 4;
 const MODE3_BASE_LEN: u16 = 172;
 
 const LCDC: usize = 0;
@@ -65,8 +65,14 @@ pub struct Ppu {
     window_line: u8,
     /// First line after the LCD was switched on (no OAM scan, late start).
     first_line: bool,
-    vram_lock: bool,
-    oam_lock: bool,
+    /// Mode-2 STAT source also fires briefly when VBlank starts (line 144).
+    vblank_oam_irq: bool,
+    // CPU access locks; reads and writes are blocked over slightly different
+    // dot ranges on DMG.
+    vram_read_lock: bool,
+    vram_write_lock: bool,
+    oam_read_lock: bool,
+    oam_write_lock: bool,
     /// Dots elapsed while the LCD is off (to keep producing blank frames).
     off_dots: u32,
 }
@@ -100,8 +106,11 @@ impl Ppu {
             wy_triggered: false,
             window_line: 0,
             first_line: false,
-            vram_lock: false,
-            oam_lock: false,
+            vblank_oam_irq: false,
+            vram_read_lock: false,
+            vram_write_lock: false,
+            oam_read_lock: false,
+            oam_write_lock: false,
             off_dots: 0,
         };
         ppu.update_stat_line();
@@ -142,7 +151,7 @@ impl Ppu {
         (self.lyc_flag && sel & 0x40 != 0)
             || (self.irq_mode == 0 && sel & 0x08 != 0)
             || (self.irq_mode == 1 && sel & 0x10 != 0)
-            || (self.irq_mode == 2 && sel & 0x20 != 0)
+            || ((self.irq_mode == 2 || self.vblank_oam_irq) && sel & 0x20 != 0)
     }
 
     /// Recompute LYC flag and the OR'ed STAT line; raise IRQ on rising edge.
@@ -187,37 +196,47 @@ impl Ppu {
                 self.wy_triggered = false;
                 self.window_line = 0;
             }
-            if self.ly <= 144 {
+            if (1..144).contains(&self.ly) {
                 self.irq_mode = 2;
             }
             if self.ly < 144 {
-                self.oam_lock = true;
+                self.oam_read_lock = true;
             }
         } else if self.dot == LINE_PREFIX {
             if self.ly < 144 {
                 self.mode = 2;
+                if self.ly == 0 {
+                    self.irq_mode = 2;
+                }
+                self.oam_write_lock = true;
             } else if self.ly == 144 {
                 self.mode = 1;
                 self.irq_mode = 1;
+                self.vblank_oam_irq = true;
                 self.pending_irq |= irq::VBLANK;
                 self.frame_ready = true;
             }
         } else if self.ly < 144 {
             if self.dot == MODE3_START {
                 self.start_mode3();
-                self.vram_lock = !self.first_line;
+                self.vram_read_lock = !self.first_line;
+                self.oam_write_lock = false;
             } else if self.dot == MODE3_START + LINE_PREFIX {
                 self.mode = 3;
-                self.vram_lock = true;
-                self.oam_lock = true;
+                self.vram_read_lock = true;
+                self.vram_write_lock = true;
+                self.oam_read_lock = true;
+                self.oam_write_lock = true;
             } else if self.dot == self.mode0_dot {
                 self.render_line();
                 self.irq_mode = 0;
             } else if self.dot == self.mode0_dot + LINE_PREFIX {
                 self.mode = 0;
-                self.vram_lock = false;
-                self.oam_lock = false;
+                self.unlock_all();
             }
+        }
+        if self.dot == LINE_PREFIX + 4 {
+            self.vblank_oam_irq = false;
         }
         self.update_stat_line();
     }
@@ -375,36 +394,36 @@ impl Ppu {
         }
     }
 
-    fn vram_blocked(&self) -> bool {
-        self.lcd_on() && self.vram_lock
-    }
-    fn oam_blocked(&self) -> bool {
-        self.lcd_on() && self.oam_lock
+    fn unlock_all(&mut self) {
+        self.vram_read_lock = false;
+        self.vram_write_lock = false;
+        self.oam_read_lock = false;
+        self.oam_write_lock = false;
     }
 
     /// `addr` in 0x8000..=0x9FFF. CPU view (0xFF while blocked in mode 3).
     pub fn read_vram(&self, addr: u16) -> u8 {
-        if self.vram_blocked() {
+        if self.vram_read_lock {
             0xFF
         } else {
             self.vram[(addr & 0x1FFF) as usize]
         }
     }
     pub fn write_vram(&mut self, addr: u16, val: u8) {
-        if !self.vram_blocked() {
+        if !self.vram_write_lock {
             self.vram[(addr & 0x1FFF) as usize] = val;
         }
     }
     /// `addr` in 0xFE00..=0xFE9F. CPU view (0xFF while blocked in modes 2/3).
     pub fn read_oam(&self, addr: u16) -> u8 {
-        if self.oam_blocked() {
+        if self.oam_read_lock {
             0xFF
         } else {
             self.oam[(addr - 0xFE00) as usize]
         }
     }
     pub fn write_oam(&mut self, addr: u16, val: u8) {
-        if !self.oam_blocked() {
+        if !self.oam_write_lock {
             self.oam[(addr - 0xFE00) as usize] = val;
         }
     }
@@ -442,8 +461,7 @@ impl Ppu {
                     self.dot = 0;
                     self.mode = 0;
                     self.irq_mode = 0;
-                    self.vram_lock = false;
-                    self.oam_lock = false;
+                    self.unlock_all();
                     self.first_line = false;
                     self.off_dots = 0;
                     self.wy_triggered = false;
@@ -457,8 +475,7 @@ impl Ppu {
                     self.first_line = true;
                     self.mode = 0;
                     self.irq_mode = 0;
-                    self.vram_lock = false;
-                    self.oam_lock = false;
+                    self.unlock_all();
                     self.update_stat_line();
                 }
             }
