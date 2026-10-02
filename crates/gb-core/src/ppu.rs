@@ -157,8 +157,8 @@ impl Ppu {
     /// Recompute LYC flag and the OR'ed STAT line; raise IRQ on rising edge.
     fn update_stat_line(&mut self) {
         if !self.lcd_on() {
-            self.lyc_flag = false;
-            self.stat_line = false;
+            // The comparison clock is stopped: the flag and its contribution
+            // to the STAT line are retained.
             return;
         }
         self.lyc_flag = self.compare_ly() == Some(self.regs[LYC]);
@@ -183,6 +183,13 @@ impl Ppu {
                 self.step_dot();
             }
         }
+        std::mem::take(&mut self.pending_irq)
+    }
+
+    /// IF bits raised by a register write since the last tick/take. The bus
+    /// calls this right after `write_reg` so the CPU sees the IRQ at the
+    /// end of the writing instruction.
+    pub fn take_irq(&mut self) -> u8 {
         std::mem::take(&mut self.pending_irq)
     }
 
@@ -460,21 +467,22 @@ impl Ppu {
                     self.ly = 0;
                     self.dot = 0;
                     self.mode = 0;
-                    self.irq_mode = 0;
+                    self.irq_mode = 3;
+                    self.vblank_oam_irq = false;
+                    self.stat_line = self.lyc_flag && self.regs[STAT] & 0x40 != 0;
                     self.unlock_all();
                     self.first_line = false;
                     self.off_dots = 0;
                     self.wy_triggered = false;
                     self.window_line = 0;
                     self.framebuffer.fill(self.palette[0]);
-                    self.update_stat_line();
                 } else if !was_on && on {
                     // Line 0 after LCD-on has no OAM scan: mode 0 until mode 3.
                     self.ly = 0;
                     self.dot = FIRST_LINE_DOT;
                     self.first_line = true;
                     self.mode = 0;
-                    self.irq_mode = 0;
+                    self.irq_mode = 3;
                     self.unlock_all();
                     self.update_stat_line();
                 }

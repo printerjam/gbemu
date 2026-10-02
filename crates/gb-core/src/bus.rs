@@ -151,7 +151,11 @@ impl Bus {
                 self.dma.reg = val;
                 self.dma.pending = Some((0, (val as u16) << 8));
             }
-            0xFF40..=0xFF4B => self.ppu.write_reg(addr, val),
+            0xFF40..=0xFF4B => {
+                self.ppu.write_reg(addr, val);
+                // Register writes can raise STAT immediately (LYC/STAT/LCDC).
+                self.int_flag |= self.ppu.take_irq();
+            }
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = val,
             0xFFFF => self.int_enable = val,
             _ => {}
