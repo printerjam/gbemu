@@ -16,6 +16,7 @@ const MODE3_START: u16 = 80;
 /// Dot the first line starts at after the LCD is switched on.
 const FIRST_LINE_DOT: u16 = 4;
 const MODE3_BASE_LEN: u16 = 172;
+const SPRITE_FIRST_DISCOUNT: u16 = 3;
 
 const LCDC: usize = 0;
 const STAT: usize = 1;
@@ -139,7 +140,12 @@ impl Ppu {
     /// Value LYC is compared against right now, if any.
     fn compare_ly(&self) -> Option<u8> {
         if self.ly == 153 {
-            Some(if self.dot < LINE_PREFIX { 153 } else { 0 })
+            // LY reads 0 from dot 4, but the comparator only follows 4 dots later.
+            match self.dot {
+                0..=3 => None,
+                4..=7 => Some(153),
+                _ => Some(0),
+            }
         } else if self.dot < LINE_PREFIX && self.ly != 0 {
             None
         } else {
@@ -300,6 +306,11 @@ impl Ppu {
                 if s.x >= 168 {
                     continue;
                 }
+                if last_tile == u16::MAX {
+                    // Measured (mooneye intr_2_mode0_timing_sprites): the
+                    // first fetch overlaps 3 dots of the base length.
+                    len -= SPRITE_FIRST_DISCOUNT;
+                }
                 let pos = s.x as u16 + scx;
                 let tile = pos / 8;
                 if tile != last_tile {
@@ -347,7 +358,8 @@ impl Ppu {
                 let map = if lcdc & 0x40 != 0 { 0x1C00 } else { 0x1800 } + (self.window_line as usize / 8) * 32;
                 let row = self.window_line & 7;
                 let mut cache = (usize::MAX, 0u8, 0u8);
-                for x in wx.max(0) as usize..SCREEN_WIDTH {
+                let first = wx.max(0) as usize;
+                for (x, out) in bg.iter_mut().enumerate().skip(first) {
                     let px = (x as i32 - wx) as usize;
                     let col = px / 8;
                     if cache.0 != col {
@@ -355,7 +367,7 @@ impl Ppu {
                         cache = (col, lo, hi);
                     }
                     let bit = 7 - (px & 7);
-                    bg[x] = ((cache.1 >> bit) & 1) | (((cache.2 >> bit) & 1) << 1);
+                    *out = ((cache.1 >> bit) & 1) | (((cache.2 >> bit) & 1) << 1);
                 }
                 self.window_line += 1;
             }
@@ -363,8 +375,11 @@ impl Ppu {
 
         let bgp = self.regs[BGP];
         let row_out = ly as usize * SCREEN_WIDTH;
-        for x in 0..SCREEN_WIDTH {
-            self.framebuffer[row_out + x] = self.palette[((bgp >> (bg[x] * 2)) & 3) as usize];
+        for (out, &id) in self.framebuffer[row_out..row_out + SCREEN_WIDTH]
+            .iter_mut()
+            .zip(bg.iter())
+        {
+            *out = self.palette[((bgp >> (id * 2)) & 3) as usize];
         }
 
         if lcdc & 0x02 != 0 {
@@ -594,7 +609,7 @@ mod tests {
         p.write_oam_dma(1, 8 + 3); // x=3 -> offset (3+8... pos=11+5=16) tile aligned
         run_to(&mut p, 20, 100);
         // pos = 11 + 5 = 16 -> offset 0 -> 5 + 6
-        assert_eq!(p.mode0_dot, 80 + 172 + 5 + 11);
+        assert_eq!(p.mode0_dot, 80 + 172 + 5 + 11 - 3);
     }
 
     #[test]
@@ -705,6 +720,6 @@ mod tests {
         // window drew on lines 2..=5 -> counter 4
         assert_eq!(p.window_line, 4);
         assert_eq!(p.framebuffer()[2 * 160], 0);
-        assert_eq!(p.framebuffer()[1 * 160], 0x00FF_FFFF);
+        assert_eq!(p.framebuffer()[160], 0x00FF_FFFF);
     }
 }
