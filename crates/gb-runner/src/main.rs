@@ -3,6 +3,7 @@
 mod exec;
 mod image;
 mod suites;
+mod trace;
 
 use exec::{run_case, Outcome, TestResult};
 use gb_core::{GameBoy, CLOCK_HZ, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -17,9 +18,14 @@ usage:
   gbtest [--roms DIR] [--suite NAME]... [--filter SUBSTR] [-j N] [--long] [--wall SECS]
          [--markdown] [--json] [--screenshots DIR] [--list]
   gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--until-ldbb]
+  gbtest trace <rom> [--steps N] [--doctor]
 
 suites: blargg, mooneye, mooneye-mbc, acid2 (scored); blargg-extra (not scored)
-default suites: the scored ones. Exit code is 0 for any scoreboard run.";
+default suites: the scored ones. Exit code is 0 for any scoreboard run.
+
+trace: one line per executed instruction (default 1000000). --doctor emits Gameboy Doctor
+lines (state before each instruction) and makes LY (0xFF44) read 0x90 to the CPU, as the
+Doctor reference logs assume.";
 
 struct Opts {
     roms: PathBuf,
@@ -96,6 +102,11 @@ fn main() {
     if args.peek().map(String::as_str) == Some("run") {
         args.next();
         run_single(args);
+        return;
+    }
+    if args.peek().map(String::as_str) == Some("trace") {
+        args.next();
+        trace::run(args);
         return;
     }
     let o = parse_opts(args);
