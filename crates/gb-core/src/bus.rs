@@ -49,7 +49,11 @@ impl Bus {
             hram: [0; 0x7F],
             int_flag: 0x01,
             int_enable: 0x00,
-            dma: Dma { reg: 0xFF, active: None, pending: None },
+            dma: Dma {
+                reg: 0xFF,
+                active: None,
+                pending: None,
+            },
             cycles: 0,
         }
     }

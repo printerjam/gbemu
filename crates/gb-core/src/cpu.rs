@@ -34,7 +34,18 @@ pub struct Registers {
 impl Registers {
     /// DMG (CPU ABC) register state after the boot ROM hands over at 0x0100.
     pub fn post_boot_dmg() -> Self {
-        Registers { a: 0x01, f: 0xB0, b: 0x00, c: 0x13, d: 0x00, e: 0xD8, h: 0x01, l: 0x4D, sp: 0xFFFE, pc: 0x0100 }
+        Registers {
+            a: 0x01,
+            f: 0xB0,
+            b: 0x00,
+            c: 0x13,
+            d: 0x00,
+            e: 0xD8,
+            h: 0x01,
+            l: 0x4D,
+            sp: 0xFFFE,
+            pc: 0x0100,
+        }
     }
 }
 
@@ -46,7 +57,11 @@ pub struct Cpu {
 
 impl Cpu {
     pub fn new() -> Self {
-        Cpu { regs: Registers::post_boot_dmg(), ime: false, halted: false }
+        Cpu {
+            regs: Registers::post_boot_dmg(),
+            ime: false,
+            halted: false,
+        }
     }
 
     /// Execute one instruction (or one interrupt dispatch, or one idle

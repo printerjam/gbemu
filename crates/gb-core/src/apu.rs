@@ -7,7 +7,10 @@ pub struct Apu {
 
 impl Apu {
     pub fn new() -> Self {
-        Apu { regs: [0; 0x30], sample_rate: 48_000 }
+        Apu {
+            regs: [0; 0x30],
+            sample_rate: 48_000,
+        }
     }
 
     /// Advance `t_cycles` T-cycles.

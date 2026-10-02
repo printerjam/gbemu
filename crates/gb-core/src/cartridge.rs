@@ -30,16 +30,28 @@ impl Cartridge {
         if rom.len() < 0x150 {
             return Err(CartError::TooSmall);
         }
-        Ok(Cartridge { rom, ram: vec![0; 0x2000], rom_bank: 1 })
+        Ok(Cartridge {
+            rom,
+            ram: vec![0; 0x2000],
+            rom_bank: 1,
+        })
     }
 
     pub fn title(&self) -> String {
-        self.rom[0x134..0x144].iter().take_while(|&&b| b != 0).map(|&b| b as char).collect()
+        self.rom[0x134..0x144]
+            .iter()
+            .take_while(|&&b| b != 0)
+            .map(|&b| b as char)
+            .collect()
     }
 
     /// `addr` in 0x0000..=0x7FFF.
     pub fn read_rom(&self, addr: u16) -> u8 {
-        let off = if addr < 0x4000 { addr as usize } else { self.rom_bank as usize * 0x4000 + (addr as usize - 0x4000) };
+        let off = if addr < 0x4000 {
+            addr as usize
+        } else {
+            self.rom_bank as usize * 0x4000 + (addr as usize - 0x4000)
+        };
         self.rom.get(off % self.rom.len()).copied().unwrap_or(0xFF)
     }
     /// MBC register writes (`addr` in 0x0000..=0x7FFF).

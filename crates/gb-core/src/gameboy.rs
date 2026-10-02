@@ -15,7 +15,10 @@ impl GameBoy {
     /// Power on with `rom` inserted, skipping the boot ROM (post-boot DMG state).
     pub fn new(rom: Vec<u8>) -> Result<Self, CartError> {
         let cart = Cartridge::from_rom(rom)?;
-        Ok(GameBoy { cpu: Cpu::new(), bus: Bus::new(cart) })
+        Ok(GameBoy {
+            cpu: Cpu::new(),
+            bus: Bus::new(cart),
+        })
     }
 
     /// Execute one CPU step. See [`Cpu::step`] for the return value.

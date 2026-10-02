@@ -23,7 +23,10 @@ pub struct Joypad {
 
 impl Joypad {
     pub fn new() -> Self {
-        Joypad { select: 0x30, pressed: 0 }
+        Joypad {
+            select: 0x30,
+            pressed: 0,
+        }
     }
 
     pub fn read(&self) -> u8 {

@@ -16,7 +16,13 @@ pub struct Serial {
 
 impl Serial {
     pub fn new() -> Self {
-        Serial { sb: 0, sc: 0x7E, bits_left: 0, counter: 0, output: Vec::new() }
+        Serial {
+            sb: 0,
+            sc: 0x7E,
+            bits_left: 0,
+            counter: 0,
+            output: Vec::new(),
+        }
     }
 
     /// Advance one M-cycle. Returns IF bits to raise.
