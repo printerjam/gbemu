@@ -13,6 +13,8 @@ const LINES: u8 = 154;
 /// still reflect the previous line.
 const LINE_PREFIX: u16 = 4;
 const MODE3_START: u16 = 80;
+/// Dot the first line starts at after the LCD is switched on.
+const FIRST_LINE_DOT: u16 = 8;
 const MODE3_BASE_LEN: u16 = 172;
 
 const LCDC: usize = 0;
@@ -61,6 +63,10 @@ pub struct Ppu {
     sprite_count: usize,
     wy_triggered: bool,
     window_line: u8,
+    /// First line after the LCD was switched on (no OAM scan, late start).
+    first_line: bool,
+    vram_lock: bool,
+    oam_lock: bool,
     /// Dots elapsed while the LCD is off (to keep producing blank frames).
     off_dots: u32,
 }
@@ -93,6 +99,9 @@ impl Ppu {
             sprite_count: 0,
             wy_triggered: false,
             window_line: 0,
+            first_line: false,
+            vram_lock: false,
+            oam_lock: false,
             off_dots: 0,
         };
         ppu.update_stat_line();
@@ -172,6 +181,7 @@ impl Ppu {
         self.dot += 1;
         if self.dot == DOTS_PER_LINE {
             self.dot = 0;
+            self.first_line = false;
             self.ly = if self.ly == LINES - 1 { 0 } else { self.ly + 1 };
             if self.ly == 0 {
                 self.wy_triggered = false;
@@ -179,6 +189,9 @@ impl Ppu {
             }
             if self.ly <= 144 {
                 self.irq_mode = 2;
+            }
+            if self.ly < 144 {
+                self.oam_lock = true;
             }
         } else if self.dot == LINE_PREFIX {
             if self.ly < 144 {
@@ -192,10 +205,18 @@ impl Ppu {
         } else if self.ly < 144 {
             if self.dot == MODE3_START {
                 self.start_mode3();
+                self.vram_lock = !self.first_line;
+            } else if self.dot == MODE3_START + LINE_PREFIX {
+                self.mode = 3;
+                self.vram_lock = true;
+                self.oam_lock = true;
             } else if self.dot == self.mode0_dot {
                 self.render_line();
-                self.mode = 0;
                 self.irq_mode = 0;
+            } else if self.dot == self.mode0_dot + LINE_PREFIX {
+                self.mode = 0;
+                self.vram_lock = false;
+                self.oam_lock = false;
             }
         }
         self.update_stat_line();
@@ -215,7 +236,6 @@ impl Ppu {
 
     /// OAM scan result, mode 3 length.
     fn start_mode3(&mut self) {
-        self.mode = 3;
         self.irq_mode = 3;
         if self.regs[LCDC] & 0x20 != 0 && self.ly == self.regs[WY] {
             self.wy_triggered = true;
@@ -356,10 +376,10 @@ impl Ppu {
     }
 
     fn vram_blocked(&self) -> bool {
-        self.lcd_on() && self.mode == 3
+        self.lcd_on() && self.vram_lock
     }
     fn oam_blocked(&self) -> bool {
-        self.lcd_on() && self.mode >= 2
+        self.lcd_on() && self.oam_lock
     }
 
     /// `addr` in 0x8000..=0x9FFF. CPU view (0xFF while blocked in mode 3).
@@ -422,6 +442,9 @@ impl Ppu {
                     self.dot = 0;
                     self.mode = 0;
                     self.irq_mode = 0;
+                    self.vram_lock = false;
+                    self.oam_lock = false;
+                    self.first_line = false;
                     self.off_dots = 0;
                     self.wy_triggered = false;
                     self.window_line = 0;
@@ -430,9 +453,12 @@ impl Ppu {
                 } else if !was_on && on {
                     // Line 0 after LCD-on has no OAM scan: mode 0 until mode 3.
                     self.ly = 0;
-                    self.dot = LINE_PREFIX;
+                    self.dot = FIRST_LINE_DOT;
+                    self.first_line = true;
                     self.mode = 0;
                     self.irq_mode = 0;
+                    self.vram_lock = false;
+                    self.oam_lock = false;
                     self.update_stat_line();
                 }
             }
