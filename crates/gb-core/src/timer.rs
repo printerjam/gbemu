@@ -6,6 +6,10 @@
 
 use crate::irq;
 
+/// Empirical: a TAC write evaluates the falling-edge check against the divider two M-cycles
+/// later than the tick-then-write model implies (mooneye timer/rapid_toggle needs exactly this).
+const AHEAD: u16 = 8;
+
 pub struct Timer {
     /// Internal 16-bit divider; DIV (0xFF04) is the upper byte.
     div: u16,
@@ -16,28 +20,35 @@ pub struct Timer {
     overflow_pending: bool,
     /// The reload happened on the last tick (TIMA writes ignored, TMA writes propagate).
     reloading: bool,
+    /// A DIV/TAC write produced a falling edge; the increment lands at the start of the next M-cycle.
+    deferred_inc: bool,
 }
 
 impl Timer {
     pub fn new() -> Self {
         Timer {
-            div: 0xABCC,
+            div: 0xABC8,
             tima: 0,
             tma: 0,
             tac: 0,
             overflow_pending: false,
             reloading: false,
+            deferred_inc: false,
         }
     }
 
     fn signal(&self) -> bool {
+        self.signal_at(self.div)
+    }
+
+    fn signal_at(&self, div: u16) -> bool {
         let bit = match self.tac & 3 {
             0 => 9,
             1 => 3,
             2 => 5,
             _ => 7,
         };
-        self.tac & 4 != 0 && self.div & (1 << bit) != 0
+        self.tac & 4 != 0 && div & (1 << bit) != 0
     }
 
     fn increment(&mut self) {
@@ -57,6 +68,10 @@ impl Timer {
             self.reloading = true;
             self.tima = self.tma;
             irqs = irq::TIMER;
+        }
+        if self.deferred_inc {
+            self.deferred_inc = false;
+            self.increment();
         }
         let before = self.signal();
         self.div = self.div.wrapping_add(4);
@@ -85,9 +100,7 @@ impl Timer {
             0xFF04 => {
                 let before = self.signal();
                 self.div = 0;
-                if before {
-                    self.increment();
-                }
+                self.deferred_inc |= before;
             }
             0xFF05 => {
                 if !self.reloading {
@@ -102,11 +115,10 @@ impl Timer {
                 }
             }
             _ => {
-                let before = self.signal();
+                let ahead = self.div.wrapping_add(AHEAD);
+                let before = self.signal_at(ahead);
                 self.tac = val & 7;
-                if before && !self.signal() {
-                    self.increment();
-                }
+                self.deferred_inc |= before && !self.signal_at(ahead);
             }
         }
     }
