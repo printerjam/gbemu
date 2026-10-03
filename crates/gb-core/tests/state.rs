@@ -70,7 +70,9 @@ fn deterministic_after_load_acid2() {
 
 #[test]
 fn deterministic_after_load_cgb_acid2() {
-    let Some(r) = rom("cgb-acid2/cgb-acid2.gbc") else { return };
+    let Some(r) = rom("cgb-acid2/cgb-acid2.gbc") else {
+        return;
+    };
     check_determinism(r, 20, 30);
 }
 
@@ -83,7 +85,9 @@ fn deterministic_after_load_cgb_compat_mode() {
 #[test]
 fn deterministic_after_load_cgb_hdma_and_banks() {
     // SameSuite hdma_mode0 leaves HDMA, VRAM/WRAM banking and palette state in play.
-    let Some(r) = rom("same-suite/dma/hdma_mode0.gb") else { return };
+    let Some(r) = rom("same-suite/dma/hdma_mode0.gb") else {
+        return;
+    };
     check_determinism(r, 3, 5);
 }
 

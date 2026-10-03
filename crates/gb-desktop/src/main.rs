@@ -1,11 +1,12 @@
 //! Windowed DMG frontend.
 
 mod audio;
+mod pad;
 mod script;
 
 use audio::Audio;
 use gb_core::{Button, GameBoy, Rewind, CLOCK_HZ, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
-use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, Scale, ScaleMode, Window, WindowOptions};
 use script::Action;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -175,6 +176,67 @@ fn power_on(
     ))
 }
 
+/// Fixed button order used for held-state arrays.
+const BUTTONS: [Button; 8] = [
+    Button::Right,
+    Button::Left,
+    Button::Up,
+    Button::Down,
+    Button::A,
+    Button::B,
+    Button::Select,
+    Button::Start,
+];
+
+fn index_of(b: Button) -> usize {
+    BUTTONS.iter().position(|&x| x == b).unwrap()
+}
+
+/// Window for either the normal (resizable) or the "fullscreen" mode.
+///
+/// minifb has no fullscreen API and no way to query the screen size, so fullscreen is a borderless
+/// topmost window at the largest power-of-two scale that fits a 16:9 screen whose width is taken
+/// from a throwaway `Scale::FitScreen` probe (which only considers width), centred on that screen.
+fn make_window(title: &str, scale: usize, fullscreen: bool) -> Result<Window, String> {
+    let mut opts = WindowOptions {
+        scale: scale_enum(scale).unwrap(),
+        scale_mode: ScaleMode::AspectRatioStretch,
+        resize: true,
+        ..WindowOptions::default()
+    };
+    let mut pos = None;
+    if fullscreen {
+        let probe_opts = WindowOptions {
+            borderless: true,
+            scale: Scale::FitScreen,
+            ..WindowOptions::default()
+        };
+        let probe = Window::new(title, SCREEN_WIDTH, SCREEN_HEIGHT, probe_opts).map_err(|e| e.to_string())?;
+        let screen_w = probe.get_size().0;
+        drop(probe);
+        let screen_h = screen_w * 9 / 16;
+        // Largest scale enum value (powers of two) fitting both dimensions.
+        let s = [32, 16, 8, 4, 2, 1]
+            .into_iter()
+            .find(|s| SCREEN_WIDTH * s <= screen_w && SCREEN_HEIGHT * s <= screen_h)
+            .unwrap_or(1);
+        opts = WindowOptions {
+            borderless: true,
+            topmost: true,
+            scale: scale_enum(s).unwrap(),
+            scale_mode: ScaleMode::AspectRatioStretch,
+            ..WindowOptions::default()
+        };
+        pos = Some(((screen_w - SCREEN_WIDTH * s) / 2, (screen_h - SCREEN_HEIGHT * s) / 2));
+    }
+    let mut window = Window::new(title, SCREEN_WIDTH, SCREEN_HEIGHT, opts).map_err(|e| e.to_string())?;
+    window.set_background_color(0, 0, 0);
+    if let Some((x, y)) = pos {
+        window.set_position(x as isize, y as isize);
+    }
+    Ok(window)
+}
+
 const SLOT_KEYS: [Key; 4] = [Key::F1, Key::F2, Key::F3, Key::F4];
 
 fn state_path(rom: &Path, slot: u8) -> PathBuf {
@@ -217,12 +279,13 @@ const KEYMAP: [(Key, Button); 9] = [
     (Key::RightShift, Button::Select),
 ];
 
-/// After a state load the joypad holds the saved button state; make it follow the keys actually down now.
-fn resync_keys(window: &Window, gb: &mut GameBoy, held: &mut [bool; KEYMAP.len()]) {
-    for (i, (key, button)) in KEYMAP.iter().enumerate() {
-        held[i] = window.is_key_down(*key);
-        gb.set_button(*button, held[i]);
+/// After a state load the joypad holds the saved button state; release everything so the next input
+/// poll re-applies whatever is actually held now.
+fn resync_keys(gb: &mut GameBoy, applied: &mut [bool; 8]) {
+    for b in BUTTONS {
+        gb.set_button(b, false);
     }
+    *applied = [false; 8];
 }
 
 fn run(args: Args) -> Result<(), String> {
@@ -254,15 +317,17 @@ fn run(args: Args) -> Result<(), String> {
     } else {
         title
     };
-    let opts = WindowOptions {
-        scale: scale_enum(args.scale).unwrap(),
-        ..WindowOptions::default()
-    };
-    let mut window = Window::new(&title, SCREEN_WIDTH, SCREEN_HEIGHT, opts).map_err(|e| e.to_string())?;
+    let mut window = make_window(&title, args.scale, false)?;
+    let mut fullscreen = false;
+    let mut pad = pad::Pad::new();
+    let mut fps_frames = 0u32;
+    let mut fps_since = Instant::now();
+    let mut fps_text = String::new();
+    let mut shown_title = String::new();
 
     let mut shades = vec![0u32; SCREEN_WIDTH * SCREEN_HEIGHT];
     let mut samples = Vec::new();
-    let mut held = [false; KEYMAP.len()];
+    let mut applied = [false; 8];
     let mut frames: u64 = 0;
     let mut paused = false;
     let mut rewind = Rewind::default();
@@ -280,15 +345,23 @@ fn run(args: Args) -> Result<(), String> {
             saver.flush(&gb);
             (gb, saver) = power_on(&rom, args.model, &sav, sample_rate)?;
             rewind.clear();
-            held = [false; KEYMAP.len()];
+            applied = [false; 8];
             frames = 0;
             next_event = 0;
         }
-        for (i, (key, button)) in KEYMAP.iter().enumerate() {
-            let down = window.is_key_down(*key);
-            if down != held[i] {
-                held[i] = down;
-                gb.set_button(*button, down);
+        if window.is_key_pressed(Key::F11, KeyRepeat::No) {
+            fullscreen = !fullscreen;
+            window = make_window(&title, args.scale, fullscreen)?;
+        }
+        let pad_held = pad.as_mut().map_or([false; 8], |p| p.poll());
+        let mut want = pad_held;
+        for (key, button) in KEYMAP {
+            want[index_of(button)] |= window.is_key_down(key);
+        }
+        for (i, &down) in want.iter().enumerate() {
+            if down != applied[i] {
+                applied[i] = down;
+                gb.set_button(BUTTONS[i], down);
             }
         }
         let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
@@ -299,7 +372,7 @@ fn run(args: Args) -> Result<(), String> {
                     save_slot(&gb, &args.rom, slot);
                 } else if load_slot(&mut gb, &args.rom, slot) {
                     rewind.clear();
-                    resync_keys(&window, &mut gb, &mut held);
+                    resync_keys(&mut gb, &mut applied);
                 }
             }
         }
@@ -313,6 +386,24 @@ fn run(args: Args) -> Result<(), String> {
                 Ok(()) => eprintln!("gbemu: screenshot {}", path.display()),
                 Err(e) => eprintln!("gbemu: screenshot failed: {e}"),
             }
+        }
+
+        let fast = window.is_key_down(Key::Tab);
+        if fps_since.elapsed() >= Duration::from_millis(500) {
+            fps_text = format!("{:.1} fps", fps_frames as f64 / fps_since.elapsed().as_secs_f64());
+            fps_frames = 0;
+            fps_since = Instant::now();
+        }
+        let mut wanted = format!("{title} - {fps_text}");
+        if fast {
+            wanted.push_str(" [fast]");
+        }
+        if paused {
+            wanted = format!("{title} [paused]");
+        }
+        if wanted != shown_title {
+            window.set_title(&wanted);
+            shown_title = wanted;
         }
 
         if paused {
@@ -353,6 +444,7 @@ fn run(args: Args) -> Result<(), String> {
             gb.run_frame();
         }
         frames += 1;
+        fps_frames += 1;
         if gb.model() == gb_core::Model::Cgb {
             shades.copy_from_slice(gb.framebuffer());
         } else {
@@ -364,7 +456,6 @@ fn run(args: Args) -> Result<(), String> {
 
         samples.clear();
         gb.drain_audio(&mut samples);
-        let fast = window.is_key_down(Key::Tab);
         let mut audio_driven = false;
         if let Some(a) = &audio {
             if !samples.is_empty() && !fast {
