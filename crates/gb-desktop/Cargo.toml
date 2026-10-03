@@ -10,4 +10,7 @@ name = "gbemu"
 path = "src/main.rs"
 
 [dependencies]
+cpal = "0.18.2"
 gb-core = { path = "../gb-core" }
+minifb = "0.28.0"
+png = "0.18.1"
