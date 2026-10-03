@@ -12,6 +12,7 @@ mod pipe;
 use pipe::Pipe;
 
 const DOTS_PER_LINE: u16 = 456;
+const MODE3_RUNNING_MARK: u16 = 0xFF00;
 const LINES: u8 = 154;
 /// Dots at the start of a line during which the visible mode and LYC flag
 /// still reflect the previous line.
@@ -341,8 +342,16 @@ impl Ppu {
                 self.frame_ready = true;
             }
         } else {
-            for _ in 0..dots {
-                self.step_dot();
+            let mut left = dots;
+            while left > 0 {
+                let skip = self.idle_dots().min(left);
+                if skip > 0 {
+                    self.dot += skip as u16;
+                    left -= skip;
+                } else {
+                    self.step_dot();
+                    left -= 1;
+                }
             }
         }
         std::mem::take(&mut self.pending_irq)
@@ -355,11 +364,27 @@ impl Ppu {
         std::mem::take(&mut self.pending_irq)
     }
 
+    /// Dots that can be skipped without any observable change: HBlank/VBlank stretches after the
+    /// unlock and before the last dot of the line.
+    #[inline]
+    fn idle_dots(&self) -> u32 {
+        if self.pipe.active || self.pipe_draining() || self.pal_fix.is_some() || self.dot < 9 {
+            return 0;
+        }
+        let idle = self.ly >= 144 || (self.mode0_dot < MODE3_RUNNING_MARK && self.dot > self.mode0_dot + LINE_PREFIX);
+        if idle && self.dot < DOTS_PER_LINE - 1 {
+            (DOTS_PER_LINE - 1 - self.dot) as u32
+        } else {
+            0
+        }
+    }
+
     fn step_dot(&mut self) {
         self.dot += 1;
         if self.dot == DOTS_PER_LINE {
             self.dot = 0;
             self.first_line = false;
+            self.mode0_dot = MODE3_RUNNING_MARK;
             self.ly = if self.ly == LINES - 1 { 0 } else { self.ly + 1 };
             if self.ly == 0 {
                 self.wy_triggered = false;
@@ -604,6 +629,7 @@ impl Ppu {
                     self.ly = 0;
                     self.dot = FIRST_LINE_DOT;
                     self.first_line = true;
+                    self.mode0_dot = MODE3_RUNNING_MARK;
                     self.mode = 0;
                     self.irq_mode = 3;
                     self.unlock_all();
