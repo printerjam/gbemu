@@ -8,17 +8,18 @@ use gb_core::GameBoy;
 use std::io::{BufWriter, Write};
 
 /// Doctor mode: Gameboy Doctor's reference logs were made on an emulator whose LY (0xFF44)
-/// always reads 0x90, so the CPU sees that value instead of the real PPU line.
+/// always reads 0x90 (and whose IF read has no upper bits), so the CPU sees those values instead.
 /// Implemented as a `CpuBus` wrapper; the core is untouched.
 struct DoctorBus<'a>(&'a mut Bus);
 
 impl CpuBus for DoctorBus<'_> {
     fn read(&mut self, addr: u16) -> u8 {
         let v = self.0.read(addr);
-        if addr == 0xFF44 {
-            0x90
-        } else {
-            v
+        match addr {
+            0xFF44 => 0x90,
+            // The reference emulator returns IF without the unused upper bits (hardware reads them as 1).
+            0xFF0F => v & 0x1F,
+            _ => v,
         }
     }
     fn write(&mut self, addr: u16, val: u8) {
@@ -51,6 +52,7 @@ pub fn run(mut args: impl Iterator<Item = String>) {
     let mut gb = GameBoy::new(data).unwrap_or_else(|e| usage_error(&format!("{rom}: cartridge error {e:?}")));
     let mut out = BufWriter::new(std::io::stdout().lock());
     let mut executed = 0u64;
+    let mut carry: Option<String> = None;
     while executed < steps {
         let r = gb.cpu.regs;
         let pc = r.pc;
@@ -72,14 +74,19 @@ pub fn run(mut args: impl Iterator<Item = String>) {
                 r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l, r.sp, gb.cpu.ime as u8, gb.bus.cycles
             )
         };
-        // Interrupt dispatch and halted idle cycles are not instructions; print only real ones.
+        // Interrupt dispatch and halted idle cycles are not instructions. Reference logs show the state
+        // before the dispatch merged with the first handler instruction, so a non-instruction step
+        // carries its pre-state line over to the next executed instruction.
         let ran = if doctor {
             gb.cpu.step(&mut DoctorBus(&mut gb.bus))
         } else {
             gb.step()
         };
-        if ran.is_some() {
+        if ran.is_none() {
+            carry.get_or_insert(line);
+        } else {
             executed += 1;
+            let line = carry.take().unwrap_or(line);
             if writeln!(out, "{line}").is_err() {
                 return; // closed pipe (e.g. `| head`)
             }
