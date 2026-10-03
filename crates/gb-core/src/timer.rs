@@ -28,8 +28,13 @@ pub struct Timer {
 
 impl Timer {
     pub fn new() -> Self {
+        Self::with_div(0xABC8)
+    }
+
+    /// Timer whose internal divider starts at `div` (post-boot phase differs per model).
+    pub fn with_div(div: u16) -> Self {
         Timer {
-            div: 0xABC8,
+            div,
             tima: 0,
             tma: 0,
             tac: 0,

@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: gbterm <rom.gb> [--palette gray|dmg-green|pocket] [--exit-after-frames N] \
+const USAGE: &str =
+    "usage: gbterm <rom.gb> [--palette gray|dmg-green|pocket] [--model dmg|cgb|auto] [--exit-after-frames N] \
 [--dump-frame-ansi FILE]
 
 keys: arrows/WASD d-pad, X/K = A, Z/J = B, Enter = Start, Backspace/Shift+Tab = Select, P pause, Q/Esc quit
@@ -28,6 +29,7 @@ const FPS: f64 = 59.7275;
 struct Args {
     rom: PathBuf,
     palette: Palette,
+    model: Option<gb_core::Model>,
     exit_after: Option<u64>,
     dump: Option<PathBuf>,
 }
@@ -42,6 +44,7 @@ fn parse_args() -> Args {
     let mut a = Args {
         rom: PathBuf::new(),
         palette: Palette::Gray,
+        model: None,
         exit_after: None,
         dump: None,
     };
@@ -52,6 +55,10 @@ fn parse_args() -> Args {
             "--palette" => {
                 let v = val("--palette");
                 a.palette = Palette::parse(&v).unwrap_or_else(|| fail(&format!("unknown palette '{v}'")));
+            }
+            "--model" => {
+                let v = val("--model");
+                a.model = gb_core::Model::parse_choice(&v).unwrap_or_else(|e| fail(&e));
             }
             "--exit-after-frames" => {
                 let v = val("--exit-after-frames");
@@ -159,7 +166,8 @@ fn truncate(s: &str, cols: usize) -> String {
 fn main() {
     let args = parse_args();
     let rom = std::fs::read(&args.rom).unwrap_or_else(|e| fail(&format!("{}: {e}", args.rom.display())));
-    let mut gb = GameBoy::new(rom).unwrap_or_else(|e| fail(&format!("{}: cartridge error: {e:?}", args.rom.display())));
+    let mut gb = GameBoy::with_model_choice(rom, args.model)
+        .unwrap_or_else(|e| fail(&format!("{}: cartridge error: {e:?}", args.rom.display())));
     let sav = sav_path(&args.rom);
     if gb.cartridge().has_battery() {
         if let Ok(data) = std::fs::read(&sav) {

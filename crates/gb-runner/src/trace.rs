@@ -39,17 +39,22 @@ impl CpuBus for DoctorBus<'_> {
 pub fn run(mut args: impl Iterator<Item = String>) {
     let mut rom: Option<String> = None;
     let (mut steps, mut doctor) = (1_000_000u64, false);
+    let mut model = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--steps" => steps = parse(&value(&mut args, &a), &a),
             "--doctor" => doctor = true,
+            "--model" => {
+                model = gb_core::Model::parse_choice(&value(&mut args, &a)).unwrap_or_else(|e| usage_error(&e))
+            }
             _ if !a.starts_with("--") && rom.is_none() => rom = Some(a),
             _ => usage_error(&format!("trace: unknown argument '{a}'")),
         }
     }
     let rom = rom.unwrap_or_else(|| usage_error("trace: missing <rom>"));
     let data = std::fs::read(&rom).unwrap_or_else(|e| usage_error(&format!("{rom}: {e}")));
-    let mut gb = GameBoy::new(data).unwrap_or_else(|e| usage_error(&format!("{rom}: cartridge error {e:?}")));
+    let mut gb = GameBoy::with_model_choice(data, model)
+        .unwrap_or_else(|e| usage_error(&format!("{rom}: cartridge error {e:?}")));
     let mut out = BufWriter::new(std::io::stdout().lock());
     let mut executed = 0u64;
     let mut carry: Option<String> = None;

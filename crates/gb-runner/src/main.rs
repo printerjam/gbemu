@@ -17,10 +17,10 @@ const USAGE: &str = "\
 usage:
   gbtest [--roms DIR] [--suite NAME]... [--filter SUBSTR] [-j N] [--long] [--wall SECS]
          [--markdown] [--json] [--screenshots DIR] [--list]
-  gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--wav out.wav] [--until-ldbb]
+  gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--wav out.wav] [--until-ldbb] [--model dmg|cgb|auto]
   gbtest trace <rom> [--steps N] [--doctor]
 
-suites: blargg, mooneye, mooneye-mbc, acid2, mbc3 (scored); blargg-extra (not scored)
+suites: blargg, mooneye, mooneye-mbc, acid2, mbc3, cgb (scored); blargg-extra, cgb-extra (not scored)
 default suites: the scored ones. Exit code is 0 for any scoreboard run.
 
 trace: one line per executed instruction (default 1000000). --doctor emits Gameboy Doctor
@@ -374,6 +374,7 @@ fn write_wav(path: &Path, samples: &[f32], rate: u32) {
 fn run_single(mut args: impl Iterator<Item = String>) {
     let mut rom: Option<String> = None;
     let (mut seconds, mut frames, mut shot, mut until) = (10.0f64, None::<u64>, None::<PathBuf>, false);
+    let mut model = None;
     let mut wav: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -382,13 +383,17 @@ fn run_single(mut args: impl Iterator<Item = String>) {
             "--screenshot" => shot = Some(value(&mut args, &a).into()),
             "--wav" => wav = Some(value(&mut args, &a).into()),
             "--until-ldbb" => until = true,
+            "--model" => {
+                model = gb_core::Model::parse_choice(&value(&mut args, &a)).unwrap_or_else(|e| usage_error(&e))
+            }
             _ if !a.starts_with("--") && rom.is_none() => rom = Some(a),
             _ => usage_error(&format!("unknown argument '{a}'")),
         }
     }
     let rom = rom.unwrap_or_else(|| usage_error("run: missing <rom>"));
     let data = std::fs::read(&rom).unwrap_or_else(|e| usage_error(&format!("{rom}: {e}")));
-    let mut gb = GameBoy::new(data).unwrap_or_else(|e| usage_error(&format!("{rom}: cartridge error {e:?}")));
+    let mut gb = GameBoy::with_model_choice(data, model)
+        .unwrap_or_else(|e| usage_error(&format!("{rom}: cartridge error {e:?}")));
     let limit = match frames {
         Some(f) => f * CYCLES_PER_FRAME as u64,
         None => (seconds * CLOCK_HZ as f64) as u64,

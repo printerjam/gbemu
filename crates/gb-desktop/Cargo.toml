@@ -12,5 +12,9 @@ path = "src/main.rs"
 [dependencies]
 cpal = "0.18.2"
 gb-core = { path = "../gb-core" }
+gilrs = { version = "0.11.2", optional = true }
 minifb = "0.28.0"
 png = "0.18.1"
+
+[features]
+gamepad = ["dep:gilrs"]
