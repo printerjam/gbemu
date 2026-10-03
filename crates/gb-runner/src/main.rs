@@ -454,7 +454,13 @@ fn run_single(mut args: impl Iterator<Item = String>) {
         write_wav(p, &audio, WAV_RATE);
     }
     if until_pc.is_some() {
-        println!("div_counter={:04X} cycles={}", gb.bus.timer.div_counter(), gb.cycles());
+        println!(
+            "div_counter={:04X} cycles={} ly={} dot={}",
+            gb.bus.timer.div_counter(),
+            gb.cycles(),
+            gb.bus.ppu.read_reg(0xFF44),
+            gb.bus.ppu.dot()
+        );
     }
     let serial = String::from_utf8_lossy(gb.serial_output()).into_owned();
     println!(
