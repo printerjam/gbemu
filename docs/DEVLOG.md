@@ -43,7 +43,8 @@ frontends and tools, and `gb-core` stays dependency-light.
 Notable steps:
 - Gambatte DMG screenshot groups scored ~0%. Investigation showed the runner was fine; the shared cause is the
   scanline renderer sampling registers once per line, so mid-mode-3 writes (`scx_during_m3`, `scy`, `bgtiledata`,
-  `bgtilemap`) cannot show up. A pixel-FIFO PPU is the fix and was in progress when this log was written.
+  `bgtilemap`) cannot show up. The pixel-FIFO PPU (`ppu/pipe.rs`) then replaced it: mealybug 1 → 4 of 24, +32 overall,
+  with 18 window `late_reenable` tests lost (mid-line window disable is not modelled yet).
 - Serial: the DMG edge look-ahead now applies only until DIV is first written (three gambatte serial tests).
 - Interrupt dispatch: acknowledging the IF bit after the low-byte push at normal speed fixed `late_if_via_sp_if` and
   the `late_retrigger_2` family (+14 gambatte tests); double-speed acknowledge timing remains open.
@@ -53,6 +54,12 @@ Notable steps:
 - Tooling and features: `gbtest bench` and `scripts/bench.sh` (the first measurements showed 300-390 frames/s, i.e. 5-7x
   real time, with the PPU about 57% of sampled time), Game Genie/GameShark cheats, web cheats box, gamepad, touch
   d-pad and PWA offline support, and these docs.
+- CGB speed switch: the pause is 2^17 CPU clocks (age spsw-tima, gambatte), not Pan Docs' 2050 M-cycles; HDMA blocks
+  start at instruction boundaries and follow gambatte's HALT/HDMA rules.
+- APU: PCM12/PCM34, SameBoy-model noise counter, staged sweep and CGB envelope (same-suite-cgb 9 → 68 of 77). Where
+  CGB-C (gambatte) and CGB-E (SameSuite) disagree we model CGB-E.
+- Perf: PPU bulk-advance through idle HBlank/VBlank and an event-free APU fast path; Tobu runs at about 15x real time.
+- End of the session: 152/152 scored, 4115/6161 across every suite in the collection.
 
 ## Bugs worth remembering
 

@@ -1,7 +1,7 @@
 # gbemu
 
-A Game Boy / Game Boy Color emulator written from scratch in Rust, with no emulator crates: SM83 CPU, scanline PPU
-with dot-accurate mode timing, four-channel APU, timer, serial, joypad, MBC1/2/3(RTC)/5, save states and rewind.
+A Game Boy / Game Boy Color emulator written from scratch in Rust, with no emulator crates: SM83 CPU, pixel-FIFO PPU,
+four-channel APU, timer, serial, joypad, MBC1/2/3(RTC)/5, save states and rewind.
 `gb-core` has no I/O (its only dependencies are `serde` and `bincode`, for save states), so the same core drives a
 desktop window, a terminal, a TUI debugger, a headless test runner and a WebAssembly build.
 It passes all 152 scored test ROMs (blargg, mooneye, acid2, CGB, MBC suites) and plays real homebrew.
