@@ -733,6 +733,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gb-wasm"
+version = "0.1.0"
+dependencies = [
+ "gb-core",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
