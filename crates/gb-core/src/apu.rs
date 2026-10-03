@@ -183,6 +183,43 @@ impl Envelope {
     }
 }
 
+/// CGB sweep unit: the frequency update, the overflow check and the 1 MHz calculation countdown are separate
+/// stages (modelled after SameBoy's reverse engineering).
+#[derive(Clone, Serialize, Deserialize)]
+struct CgbSweep {
+    /// Calculation countdown (1 MHz ticks) and the delay before it starts.
+    cd: u8,
+    reload: u8,
+    instant: bool,
+    unshifted: bool,
+    addend: u16,
+    shadow: u16,
+    completed: u16,
+    /// T-cycle time until which a just-triggered channel holds the shadow frequency.
+    hold_until: u64,
+    /// 3-bit sweep period counter, counting 128 Hz ticks up to 7.
+    counter: u8,
+    /// T-cycles to the next 1 MHz calculation tick (NEVER when nothing is pending).
+    t: u32,
+}
+
+impl CgbSweep {
+    fn new() -> Self {
+        CgbSweep {
+            cd: 0,
+            reload: 0,
+            instant: false,
+            unshifted: false,
+            addend: 0,
+            shadow: 0,
+            completed: 0,
+            hold_until: 0,
+            counter: 0,
+            t: NEVER,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Square {
     enabled: bool,
@@ -248,6 +285,7 @@ pub struct Apu {
     fs: u8,
 
     ch1: Square,
+    sw: CgbSweep,
     ch2: Square,
     // wave
     ch3_enabled: bool,
@@ -310,6 +348,7 @@ impl Apu {
             power: true,
             fs: 0,
             ch1: Square::new(),
+            sw: CgbSweep::new(),
             ch2: Square::new(),
             ch3_enabled: false,
             ch3_timer: NEVER,
@@ -369,7 +408,7 @@ impl Apu {
         let t2 = if self.ch2.enabled { self.ch2.timer } else { NEVER };
         let t4 = if self.ch4_enabled { self.ch4_timer } else { NEVER };
         // Fast path: no channel event and no output sample is due within this call.
-        if t_cycles < self.until_sample && t_cycles < t1.min(t2).min(self.ch3_timer).min(t4) {
+        if t_cycles < self.until_sample && t_cycles < t1.min(t2).min(self.ch3_timer).min(t4).min(self.sw.t) {
             self.cycles += t_cycles as u64;
             self.phase += rate * t_cycles as u64;
             self.until_sample -= t_cycles;
@@ -385,6 +424,9 @@ impl Apu {
             if t4 != NEVER {
                 self.ch4_timer -= t_cycles;
             }
+            if self.sw.t != NEVER {
+                self.sw.t -= t_cycles;
+            }
             return;
         }
         let mut remaining = t_cycles;
@@ -395,7 +437,8 @@ impl Apu {
                 .min(if run1 { self.ch1.timer } else { NEVER })
                 .min(if run2 { self.ch2.timer } else { NEVER })
                 .min(self.ch3_timer)
-                .min(if self.ch4_enabled { self.ch4_timer } else { NEVER });
+                .min(if self.ch4_enabled { self.ch4_timer } else { NEVER })
+                .min(self.sw.t);
 
             self.phase += rate * chunk as u64;
             self.until_sample -= chunk;
@@ -428,6 +471,13 @@ impl Apu {
                     self.ch3_pos = (self.ch3_pos + 1) & 31;
                     self.ch3_sample = self.wave_nibble(self.ch3_pos);
                     self.ch3_last_read = self.cycles;
+                    changed = true;
+                }
+            }
+            if self.sw.t != NEVER {
+                self.sw.t -= chunk;
+                if self.sw.t == 0 {
+                    self.sw_edge();
                     changed = true;
                 }
             }
@@ -503,7 +553,12 @@ impl Apu {
             self.clock_lengths();
         }
         if step == 2 || step == 6 {
-            self.clock_sweep();
+            if self.cgb {
+                self.sw.counter = (self.sw.counter + 1) & 7;
+                self.sw_fire(self.sw.hold_until > self.cycles);
+            } else {
+                self.clock_sweep();
+            }
         }
         if self.cgb {
             let (r1, r2, r4) = (self.regs[0x02], self.regs[0x07], self.regs[0x11]);
@@ -587,6 +642,128 @@ impl Apu {
     }
 
     // ----------------------------------------------------------------- sweep
+
+    fn sw_freq(&self) -> u16 {
+        self.regs[3] as u16 | (self.regs[4] as u16 & 7) << 8
+    }
+
+    /// 1 MHz channel clock phase: true when the alignment counter is odd.
+    fn lf_div(&self) -> u32 {
+        1 ^ ((self.cycles.wrapping_sub(self.power_on_at) / 2) & 1) as u32
+    }
+
+    /// Frequency overflow check at the end of a calculation.
+    fn sw_calc_done(&mut self, hold: bool) {
+        if !hold {
+            self.sw.shadow = self.sw_freq();
+        }
+        let negate = self.regs[0] & 8 != 0;
+        if negate {
+            self.sw.addend ^= 0x7FF;
+        }
+        if self.sw.shadow + self.sw.addend > 0x7FF && !negate {
+            self.ch1.enabled = false;
+        }
+        self.sw.completed = self.sw.addend;
+    }
+
+    /// The sweep period elapsed (or NR10 was written with the counter at its limit): apply the previously
+    /// calculated frequency and start the next calculation.
+    fn sw_fire(&mut self, hold: bool) {
+        let nr10 = self.regs[0];
+        if nr10 & 0x70 == 0 || self.sw.counter != 7 {
+            return;
+        }
+        let shift = nr10 & 7;
+        if shift != 0 {
+            let f = (self.sw.addend + self.sw.shadow + (nr10 >> 3 & 1) as u16) & 0x7FF;
+            self.regs[3] = f as u8;
+            self.regs[4] = (self.regs[4] & !7) | (f >> 8) as u8;
+        }
+        if !hold {
+            self.sw.addend = self.sw_freq() >> shift;
+        }
+        self.sw.cd = shift;
+        self.sw.reload = 1 + self.lf_div() as u8;
+        self.sw.unshifted = shift == 0;
+        self.sw.counter = ((nr10 >> 4) & 7) ^ 7;
+        if shift == 0 {
+            self.sw.instant = true;
+        }
+        self.sw_reschedule();
+    }
+
+    fn sw_pending(&self) -> bool {
+        self.sw.reload > 0 || (self.sw.cd > 0 && (self.regs[0] & 7 != 0 || self.sw.unshifted))
+    }
+
+    /// Arrange for the next 1 MHz tick if a calculation is pending.
+    fn sw_reschedule(&mut self) {
+        if !self.sw_pending() {
+            self.sw.t = NEVER;
+        } else if self.sw.t == NEVER {
+            let r = (self.cycles.wrapping_sub(self.power_on_at) % 4) as u32;
+            let dt = (2 + 4 - r) % 4;
+            self.sw.t = if dt == 0 { 4 } else { dt };
+        }
+    }
+
+    /// One 1 MHz calculation tick.
+    fn sw_edge(&mut self) {
+        // The shadow hold is evaluated as of the start of the CPU cycle this tick belongs to.
+        let hold = self.sw.hold_until > self.cycles.saturating_sub(2);
+        let mut e = 1u8;
+        if self.sw.reload > e {
+            self.sw.reload -= e;
+            e = 0;
+        } else {
+            if self.sw.reload != 0 && self.sw.cd == 0 && self.sw.instant {
+                self.sw_calc_done(hold);
+            }
+            self.sw.instant = false;
+            e -= self.sw.reload;
+            self.sw.reload = 0;
+        }
+        if self.sw.cd != 0 && (self.regs[0] & 7 != 0 || self.sw.unshifted) {
+            if self.sw.cd > e {
+                self.sw.cd -= e;
+            } else {
+                self.sw.cd = 0;
+                self.sw_calc_done(hold);
+            }
+        }
+        self.sw.t = NEVER;
+        self.sw_reschedule();
+        if self.sw.t != NEVER {
+            self.sw.t = 4;
+        }
+    }
+
+    fn sw_write_nr10(&mut self, val: u8) {
+        let hold = self.sw.hold_until > self.cycles;
+        if self.sw.cd != 0 || self.sw.reload != 0 {
+            if self.sw.reload == 2 {
+                // The countdown just reloaded: reload it again from the new shift.
+                self.sw.cd = val & 7;
+                if self.sw.cd == 0 {
+                    self.sw.reload = 0;
+                }
+            }
+            if val & 7 != 0 && self.regs[0] & 7 == 0 && self.lf_div() == 0 && self.sw.cd > 1 {
+                self.sw.cd -= 1;
+                if self.sw.cd == 0 {
+                    self.sw_calc_done(hold);
+                }
+            }
+        }
+        let old_negate = (self.regs[0] >> 3 & 1) as u16;
+        self.regs[0] = val;
+        if self.sw.shadow + self.sw.completed + old_negate > 0x7FF && val & 8 == 0 {
+            self.ch1.enabled = false;
+        }
+        self.sw_fire(hold);
+        self.sw_reschedule();
+    }
 
     fn sweep_calc(&mut self) -> u16 {
         let nr10 = self.regs[0x00];
@@ -971,6 +1148,7 @@ impl Apu {
         }
         let odd = self.fs_odd();
         match i {
+            0x00 if self.cgb => self.sw_write_nr10(val),
             0x00 => {
                 if self.regs[0] & 8 != 0 && val & 8 == 0 && self.ch1.negate_used {
                     self.ch1.enabled = false;
@@ -1126,6 +1304,7 @@ impl Apu {
             self.ch2.env = Envelope::default();
             self.ch4_env = Envelope::default();
             self.ch1.sweep_enabled = false;
+            self.sw = CgbSweep::new();
             self.ch3_sample = 0;
             self.power = false;
         } else {
@@ -1160,6 +1339,26 @@ impl Apu {
             self.ch1.out = DUTY[(self.regs[0x01] >> 6) as usize][self.ch1.pos as usize];
         }
         self.ch1.env.trigger(self.regs[0x02]);
+        if self.cgb {
+            let was_active = self.ch1.enabled;
+            self.ch1.enabled = dac;
+            let shift = nr10 & 7;
+            self.sw.instant = false;
+            self.sw.shadow = 0;
+            self.sw.completed = 0;
+            if shift != 0 {
+                self.sw.cd = shift;
+                self.sw.reload = 2 + !was_active as u8;
+                self.sw.unshifted = false;
+                self.sw.addend = self.sw_freq() >> shift;
+            } else {
+                self.sw.addend = 0;
+            }
+            self.sw.hold_until = self.cycles + 2 * (4 - self.lf_div() as u64);
+            self.sw.counter = ((nr10 >> 4) & 7) ^ 7;
+            self.sw_reschedule();
+            return;
+        }
         self.ch1.shadow = self.regs[0x03] as u16 | ((self.regs[0x04] as u16 & 7) << 8);
         let period = (nr10 >> 4) & 7;
         self.ch1.sweep_timer = if period == 0 { 8 } else { period };
