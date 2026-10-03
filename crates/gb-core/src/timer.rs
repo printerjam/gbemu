@@ -100,6 +100,7 @@ impl Timer {
     }
 
     /// Advance one M-cycle (4 T-cycles). Returns IF bits to raise.
+    #[inline]
     pub fn tick(&mut self) -> u8 {
         let mut irqs = 0;
         self.reloading = false;
@@ -109,12 +110,22 @@ impl Timer {
             self.tima = self.tma;
             irqs = irq::TIMER;
         }
-        let before = self.signal();
-        self.div = self.div.wrapping_add(4);
-        if before && !self.signal() {
+        let old = self.div;
+        self.div = old.wrapping_add(4);
+        if old & !self.div & self.clock_mask() != 0 {
             self.increment();
         }
         irqs
+    }
+
+    /// DIV bit selected by TAC, or 0 while the timer is disabled.
+    #[inline]
+    fn clock_mask(&self) -> u16 {
+        if self.tac & 4 == 0 {
+            0
+        } else {
+            [1 << 9, 1 << 3, 1 << 5, 1 << 7][(self.tac & 3) as usize]
+        }
     }
 
     /// Internal divider value (used by the bus for the APU frame sequencer).
