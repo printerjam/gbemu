@@ -207,9 +207,11 @@ impl Apu {
         while remaining > 0 {
             let to_sample = (CLOCK - self.phase).div_ceil(rate).max(1) as u32;
             let mut chunk = remaining.min(to_sample);
+            // A disabled square channel's frequency timer is frozen (its duty position is kept).
+            let (run1, run2) = (self.ch1.enabled, self.ch2.enabled);
             chunk = chunk
-                .min(self.ch1.timer)
-                .min(self.ch2.timer)
+                .min(if run1 { self.ch1.timer } else { NEVER })
+                .min(if run2 { self.ch2.timer } else { NEVER })
                 .min(self.ch3_timer)
                 .min(self.ch4_timer);
 
@@ -221,7 +223,7 @@ impl Apu {
             remaining -= chunk;
 
             let mut changed = false;
-            if self.ch1.timer != NEVER {
+            if run1 && self.ch1.timer != NEVER {
                 self.ch1.timer -= chunk;
                 if self.ch1.timer == 0 {
                     self.ch1.timer = self.square_period(0);
@@ -230,7 +232,7 @@ impl Apu {
                     changed = true;
                 }
             }
-            if self.ch2.timer != NEVER {
+            if run2 && self.ch2.timer != NEVER {
                 self.ch2.timer -= chunk;
                 if self.ch2.timer == 0 {
                     self.ch2.timer = self.square_period(5);
@@ -389,8 +391,8 @@ impl Apu {
 
     /// Time to the first duty step after a trigger: the period plus two ticks, rounded up to the next edge of
     /// the 1 MHz channel clock (matters in double speed, where a CPU cycle is only 2 T).
-    fn square_start(&self, base: usize) -> u32 {
-        let t = self.square_period(base) + 8;
+    fn square_start(&self, base: usize, active: bool) -> u32 {
+        let t = self.square_period(base) + if active { 4 } else { 8 };
         t + (4 - ((self.cycles.wrapping_sub(self.power_on_at) as u32 + t) & 3)) % 4
     }
 
@@ -715,7 +717,7 @@ impl Apu {
                 self.ch1.len -= 1;
             }
         }
-        self.ch1.timer = self.square_start(0);
+        self.ch1.timer = self.square_start(0, self.ch1.enabled);
         self.ch1.env.trigger(self.regs[0x02]);
         self.ch1.shadow = self.regs[0x03] as u16 | ((self.regs[0x04] as u16 & 7) << 8);
         let period = (nr10 >> 4) & 7;
@@ -736,7 +738,7 @@ impl Apu {
                 self.ch2.len -= 1;
             }
         }
-        self.ch2.timer = self.square_start(5);
+        self.ch2.timer = self.square_start(5, self.ch2.enabled);
         self.ch2.env.trigger(self.regs[0x07]);
         self.ch2.enabled = dac;
     }
