@@ -161,7 +161,7 @@ $('savestate').addEventListener('click', () => {
 $('loadstate').addEventListener('click', () => {
   const s = localStorage.getItem(`gb:state:${romId()}`);
   if (!s) { setStatus('No saved state for this ROM'); return; }
-  try { emu.load_state(unb64(s)); audio?.clear?.(); setStatus('State loaded'); } catch (e) { setStatus(`Load state failed: ${e.message || e}`); }
+  try { emu.load_state(unb64(s)); draw(); audio?.clear?.(); setStatus('State loaded'); } catch (e) { setStatus(`Load state failed: ${e.message || e}`); }
   $('loadstate').blur();
 });
 
