@@ -50,6 +50,9 @@ pub struct Bus {
     /// Eight 4 KiB banks; bank 0 at 0xC000, `svbk` (1-7) at 0xD000.
     wram: Vec<u8>,
     svbk: u8,
+    /// The divider has been written since power-on: from then on the model counter and the hardware counter agree,
+    /// so the DMG serial-edge look-ahead no longer applies (gambatte serial/div_write_*).
+    div_synced: bool,
     cgb: bool,
     double_speed: bool,
     /// KEY1 bit 0: speed switch armed for the next STOP.
@@ -108,6 +111,7 @@ impl Bus {
             joypad: Joypad::new(),
             wram: vec![0; 0x8000],
             svbk: 1,
+            div_synced: false,
             cgb,
             double_speed: false,
             key1_armed: false,
@@ -152,7 +156,7 @@ impl Bus {
         self.frame_sequencer_edge(div_before);
         // The divider as modelled here lags the hardware counter by one M-cycle on DMG (see Timer::new),
         // so the serial clock edge is taken 4 T ahead (mooneye serial/boot_sclk_align).
-        let lag = if self.cgb { 0 } else { 4 };
+        let lag = if self.cgb || self.div_synced { 0 } else { 4 };
         irqs |= self
             .serial
             .clock(div_before.wrapping_add(lag), self.timer.div_counter().wrapping_add(lag));
@@ -386,6 +390,7 @@ impl Bus {
             0xFF00 => self.joypad.write(val),
             0xFF01..=0xFF02 => self.serial.write(addr, val),
             0xFF04..=0xFF07 => {
+                self.div_synced |= addr == 0xFF04;
                 let before = self.timer.div_counter();
                 self.timer.write(addr, val);
                 self.frame_sequencer_edge(before);
@@ -441,6 +446,10 @@ impl CpuBus for Bus {
         if self.dma_conflict(addr).is_none() {
             self.poke(addr, val);
         }
+    }
+
+    fn double_speed(&self) -> bool {
+        self.double_speed
     }
 
     fn tick_idu(&mut self, addr: u16) {
