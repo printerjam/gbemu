@@ -610,3 +610,104 @@ impl Default for Cpu {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Flat 64 KiB memory with IF/IE modelled; counts M-cycles.
+    struct Mock {
+        mem: Vec<u8>,
+        iflag: u8,
+        ie: u8,
+        cycles: u32,
+    }
+
+    impl Mock {
+        fn new(prog: &[(u16, &[u8])]) -> Self {
+            let mut mem = vec![0u8; 0x10000];
+            for (addr, bytes) in prog {
+                mem[*addr as usize..*addr as usize + bytes.len()].copy_from_slice(bytes);
+            }
+            Mock {
+                mem,
+                iflag: 0,
+                ie: 0,
+                cycles: 0,
+            }
+        }
+    }
+
+    impl CpuBus for Mock {
+        fn read(&mut self, addr: u16) -> u8 {
+            self.cycles += 1;
+            self.mem[addr as usize]
+        }
+        fn write(&mut self, addr: u16, val: u8) {
+            self.cycles += 1;
+            self.mem[addr as usize] = val;
+        }
+        fn tick(&mut self) {
+            self.cycles += 1;
+        }
+        fn pending_interrupts(&self) -> u8 {
+            self.iflag & self.ie & 0x1F
+        }
+        fn ack_interrupt(&mut self, mask: u8) {
+            self.iflag &= !mask;
+        }
+    }
+
+    /// `EI; HALT` with an interrupt already pending: EI's delay means the interrupt is taken right
+    /// after HALT (halt bug), the return address is the HALT itself, so after the handler returns
+    /// the CPU halts again (Pan Docs: "ei halt" halt-bug case).
+    #[test]
+    fn ei_halt_with_pending_interrupt_returns_to_halt() {
+        let mut bus = Mock::new(&[
+            (0x0100, &[0xFB, 0x76, 0x00, 0x00]), // EI; HALT; NOP; NOP
+            (0x0040, &[0x04, 0xD9]),             // INC B; RETI
+        ]);
+        bus.ie = 0x01;
+        bus.iflag = 0x01;
+        let mut cpu = Cpu::new();
+        cpu.regs.b = 0;
+        cpu.regs.pc = 0x0100;
+        cpu.regs.sp = 0xFFFE;
+        assert_eq!(cpu.step(&mut bus), Some(0xFB));
+        assert_eq!(cpu.step(&mut bus), Some(0x76));
+        assert!(!cpu.halted, "pending interrupt: HALT does not halt");
+        assert!(cpu.ime, "IME is on after the instruction following EI");
+        // Dispatch pushes the address of the HALT, not the instruction after it.
+        assert_eq!(cpu.step(&mut bus), None);
+        assert_eq!(cpu.regs.pc, 0x0040);
+        assert_eq!(bus.mem[0xFFFC], 0x01);
+        assert_eq!(bus.mem[0xFFFD], 0x01);
+        assert_eq!(cpu.step(&mut bus), Some(0x04));
+        assert_eq!(cpu.step(&mut bus), Some(0xD9));
+        assert_eq!(cpu.regs.pc, 0x0101);
+        // Back at HALT with nothing pending: halts, handler never runs again.
+        assert_eq!(cpu.step(&mut bus), Some(0x76));
+        assert!(cpu.halted);
+        for _ in 0..8 {
+            assert_eq!(cpu.step(&mut bus), None);
+        }
+        assert_eq!(cpu.regs.b, 1);
+        assert_eq!(cpu.regs.pc, 0x0102);
+    }
+
+    /// HALT with IME=0 and a pending interrupt: no halt, and the next opcode byte is read twice.
+    #[test]
+    fn halt_bug_repeats_next_byte() {
+        let mut bus = Mock::new(&[(0x0100, &[0x76, 0x04, 0x00])]); // HALT; INC B; NOP
+        bus.ie = 0x04;
+        bus.iflag = 0x04;
+        let mut cpu = Cpu::new();
+        cpu.regs.b = 0;
+        cpu.regs.pc = 0x0100;
+        assert_eq!(cpu.step(&mut bus), Some(0x76));
+        assert_eq!(cpu.step(&mut bus), Some(0x04));
+        assert_eq!(cpu.step(&mut bus), Some(0x04));
+        assert_eq!(cpu.regs.b, 2);
+        assert_eq!(cpu.regs.pc, 0x0102);
+    }
+}
