@@ -17,10 +17,10 @@ const USAGE: &str = "\
 usage:
   gbtest [--roms DIR] [--suite NAME]... [--filter SUBSTR] [-j N] [--long] [--wall SECS]
          [--markdown] [--json] [--screenshots DIR] [--list]
-  gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--until-ldbb]
+  gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--wav out.wav] [--until-ldbb]
   gbtest trace <rom> [--steps N] [--doctor]
 
-suites: blargg, mooneye, mooneye-mbc, acid2 (scored); blargg-extra (not scored)
+suites: blargg, mooneye, mooneye-mbc, acid2, mbc3 (scored); blargg-extra (not scored)
 default suites: the scored ones. Exit code is 0 for any scoreboard run.
 
 trace: one line per executed instruction (default 1000000). --doctor emits Gameboy Doctor
@@ -345,14 +345,42 @@ fn print_json(cases: &[TestCase], results: &[TestResult]) {
     );
 }
 
+/// 16-bit stereo PCM WAV from interleaved f32 samples.
+fn write_wav(path: &Path, samples: &[f32], rate: u32) {
+    let data_len = (samples.len() * 2) as u32;
+    let mut w = Vec::with_capacity(44 + samples.len() * 2);
+    w.extend(b"RIFF");
+    w.extend((36 + data_len).to_le_bytes());
+    w.extend(b"WAVEfmt ");
+    w.extend(16u32.to_le_bytes());
+    w.extend(1u16.to_le_bytes());
+    w.extend(2u16.to_le_bytes());
+    w.extend(rate.to_le_bytes());
+    w.extend((rate * 4).to_le_bytes());
+    w.extend(4u16.to_le_bytes());
+    w.extend(16u16.to_le_bytes());
+    w.extend(b"data");
+    w.extend(data_len.to_le_bytes());
+    for s in samples {
+        w.extend(((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+    }
+    if let Err(e) = std::fs::write(path, w) {
+        eprintln!("gbtest: {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    println!("wav: {} ({} samples/channel)", path.display(), samples.len() / 2);
+}
+
 fn run_single(mut args: impl Iterator<Item = String>) {
     let mut rom: Option<String> = None;
     let (mut seconds, mut frames, mut shot, mut until) = (10.0f64, None::<u64>, None::<PathBuf>, false);
+    let mut wav: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--seconds" => seconds = parse(&value(&mut args, &a), &a),
             "--frames" => frames = Some(parse(&value(&mut args, &a), &a)),
             "--screenshot" => shot = Some(value(&mut args, &a).into()),
+            "--wav" => wav = Some(value(&mut args, &a).into()),
             "--until-ldbb" => until = true,
             _ if !a.starts_with("--") && rom.is_none() => rom = Some(a),
             _ => usage_error(&format!("unknown argument '{a}'")),
@@ -365,12 +393,24 @@ fn run_single(mut args: impl Iterator<Item = String>) {
         Some(f) => f * CYCLES_PER_FRAME as u64,
         None => (seconds * CLOCK_HZ as f64) as u64,
     };
+    const WAV_RATE: u32 = 48_000;
+    if wav.is_some() {
+        gb.set_sample_rate(WAV_RATE);
+    }
+    let mut audio: Vec<f32> = Vec::new();
     let mut why = "time limit";
     while gb.cycles() < limit {
         if gb.step() == Some(0x40) && until {
             why = "LD B,B";
             break;
         }
+        if wav.is_some() {
+            gb.drain_audio(&mut audio);
+        }
+    }
+    if let Some(p) = &wav {
+        gb.drain_audio(&mut audio);
+        write_wav(p, &audio, WAV_RATE);
     }
     let serial = String::from_utf8_lossy(gb.serial_output()).into_owned();
     println!(

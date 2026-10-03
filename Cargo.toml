@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gb-core", "crates/gb-runner", "crates/gb-desktop", "crates/gb-term"]
+members = ["crates/gb-core", "crates/gb-runner", "crates/gb-desktop", "crates/gb-term", "crates/gb-debug", "crates/gb-wasm"]
 
 [workspace.package]
 edition = "2021"
@@ -11,3 +11,12 @@ debug = 1
 
 [profile.dev]
 opt-level = 1
+
+# Browser build (scripts/build-web.sh): `cargo build --profile web --target wasm32-unknown-unknown -p gb-wasm`
+[profile.web]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = false
+panic = "abort"

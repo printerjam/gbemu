@@ -5,6 +5,8 @@
 //! mixed level over each constant stretch, so the output is a box-filtered
 //! downsample of the 4.194304 MHz signal.
 
+use serde::{Deserialize, Serialize};
+
 const CLOCK: u64 = 4_194_304;
 const NEVER: u32 = u32::MAX;
 
@@ -25,7 +27,7 @@ const DUTY: [[u8; 8]; 4] = [
     [0, 1, 1, 1, 1, 1, 1, 0],
 ];
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Envelope {
     volume: u8,
     timer: u8,
@@ -60,7 +62,7 @@ impl Envelope {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Square {
     enabled: bool,
     timer: u32,
@@ -90,8 +92,11 @@ impl Square {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Apu {
+    #[serde(with = "crate::state::bytes")]
     regs: [u8; 0x30],
+    #[serde(with = "crate::state::bytes")]
     wave_ram: [u8; 16],
     sample_rate: u32,
     power: bool,
@@ -126,6 +131,8 @@ pub struct Apu {
     phase: u64,
     hp_l: f32,
     hp_r: f32,
+    /// Undelivered audio is not machine state.
+    #[serde(skip)]
     out: Vec<f32>,
 }
 
@@ -712,6 +719,10 @@ impl Apu {
     }
 
     // ------------------------------------------------------------------ misc
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
 
     pub fn set_sample_rate(&mut self, hz: u32) {
         self.sample_rate = hz.max(1);
