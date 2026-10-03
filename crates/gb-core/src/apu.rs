@@ -693,6 +693,7 @@ impl Apu {
                 self.regs[i] = val;
                 if val & 0x80 == 0 {
                     self.ch3_enabled = false;
+                    self.ch3_sample = 0;
                 }
             }
             0x04 | 0x09 | 0x0E | 0x13 => {
