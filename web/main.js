@@ -25,6 +25,7 @@ let lastSaved = '';
 let rewindKey = false; // hold Q
 let rewindTouch = false;
 let audio = null;
+const padHeld = new Set(); // button codes held via gamepad
 
 // ---------- persistence ----------
 const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
@@ -112,6 +113,9 @@ async function loadRom(bytes, name) {
   $('savestate').disabled = !states;
   $('loadstate').disabled = !states;
   lastRom = { bytes, name };
+  $('cheatbtn').disabled = false;
+  $('cheattext').value = localStorage.getItem(cheatKey()) || '';
+  applyCheats(false);
   paused = false;
   $('pause').textContent = 'Pause';
   acc = 0; lastTime = 0; frames = 0;
@@ -119,6 +123,33 @@ async function loadRom(bytes, name) {
   document.title = `gbemu — ${emu.title() || name}`;
 }
 let lastRom = null;
+
+// ---------- cheats ----------
+const cheatKey = () => `gb:cheats:${romId()}`;
+function applyCheats(persist = true) {
+  if (!emu) return;
+  const text = $('cheattext').value;
+  emu.clear_cheats();
+  const errors = [];
+  let active = 0;
+  text.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.split('#')[0].trim();
+    if (!line) return;
+    try { emu.add_cheat(line); active++; } catch (e) { errors.push(`line ${i + 1}: ${e.message || e}`); }
+  });
+  $('cheaterr').textContent = errors.join('\n');
+  if (persist) {
+    try { text.trim() ? localStorage.setItem(cheatKey(), text) : localStorage.removeItem(cheatKey()); } catch (e) { errors.push(e.message); }
+    setStatus(`${active} cheat${active === 1 ? '' : 's'} active${errors.length ? `, ${errors.length} invalid` : ''}`);
+  }
+  return active;
+}
+$('cheatbtn').addEventListener('click', () => { $('cheats').classList.toggle('open'); $('cheatbtn').blur(); });
+$('cheatapply').addEventListener('click', () => applyCheats(true));
+$('cheatclear').addEventListener('click', () => { $('cheattext').value = ''; applyCheats(true); });
+// Typing in the box must not drive the game.
+$('cheattext').addEventListener('keydown', (e) => e.stopPropagation());
+$('cheattext').addEventListener('keyup', (e) => e.stopPropagation());
 
 async function loadFile(file) {
   if (!file) return;
@@ -181,6 +212,7 @@ const KEYS = {
   x: 4, k: 4, z: 5, j: 5,
   Backspace: 6, Shift: 6, Enter: 7,
 };
+const dpadPointers = new Map(); // pointerId -> Set of codes from the touch d-pad
 const touchHeld = new Map(); // pointerId -> code
 const keysDown = new Map(); // key -> code
 
@@ -188,7 +220,8 @@ const pressedAt = new Array(8).fill(-1); // frame count when each button went do
 const deferredRelease = new Set(); // releases held back until the game has seen one full frame
 
 function refreshButton(code, flush = false) {
-  const pressed = [...keysDown.values()].includes(code) || [...touchHeld.values()].includes(code);
+  const pressed = [...keysDown.values()].includes(code) || [...touchHeld.values()].includes(code) ||
+    padHeld.has(code) || [...dpadPointers.values()].some((s) => s.has(code));
   if (pressed) {
     if (pressedAt[code] < 0) pressedAt[code] = frames;
     deferredRelease.delete(code);
@@ -229,6 +262,7 @@ addEventListener('blur', () => {
   rewindKey = false; const codes = new Set(keysDown.values()); keysDown.clear(); codes.forEach(refreshButton); });
 
 for (const el of document.querySelectorAll('[data-btn]')) {
+  if (el.closest('#dpad')) continue; // the d-pad is one touch surface, handled below
   const code = Number(el.dataset.btn);
   el.addEventListener('pointerdown', (e) => {
     e.preventDefault();
@@ -242,6 +276,66 @@ for (const el of document.querySelectorAll('[data-btn]')) {
   el.addEventListener('pointercancel', up);
   el.addEventListener('contextmenu', (e) => e.preventDefault());
 }
+
+// ---------- touch d-pad: one surface, the touch angle picks one or two directions ----------
+const DPAD_DEADZONE = 0.18; // fraction of the radius
+const DPAD_AXIS = 0.38; // an axis is active when its component exceeds this fraction of the radius
+export function dpadDirections(dx, dy, radius) {
+  const out = new Set();
+  const dist = Math.hypot(dx, dy);
+  if (dist < radius * DPAD_DEADZONE) return out;
+  // Normalise so a diagonal press (45 degrees) activates both axes.
+  const nx = dx / dist, ny = dy / dist;
+  if (Math.abs(nx) > DPAD_AXIS) out.add(nx > 0 ? 0 : 1);
+  if (Math.abs(ny) > DPAD_AXIS) out.add(ny > 0 ? 3 : 2);
+  return out;
+}
+const dpadEl = $('dpad');
+function dpadUpdate(e) {
+  const r = dpadEl.getBoundingClientRect();
+  const next = dpadDirections(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2), r.width / 2);
+  const prev = dpadPointers.get(e.pointerId) || new Set();
+  dpadPointers.set(e.pointerId, next);
+  for (const c of new Set([...prev, ...next])) if (prev.has(c) !== next.has(c)) refreshButton(c);
+}
+dpadEl.addEventListener('pointerdown', (e) => { e.preventDefault(); dpadEl.setPointerCapture(e.pointerId); startAudio(); dpadUpdate(e); });
+dpadEl.addEventListener('pointermove', (e) => { if (dpadPointers.has(e.pointerId)) dpadUpdate(e); });
+const dpadUp = (e) => {
+  const prev = dpadPointers.get(e.pointerId);
+  if (!prev) return;
+  dpadPointers.delete(e.pointerId);
+  prev.forEach(refreshButton);
+};
+dpadEl.addEventListener('pointerup', dpadUp);
+dpadEl.addEventListener('pointercancel', dpadUp);
+dpadEl.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ---------- gamepad (standard mapping), polled once per animation frame; hot-plug needs no special handling ----------
+const PAD_BUTTONS = { 0: 4, 1: 5, 8: 6, 9: 7, 12: 2, 13: 3, 14: 1, 15: 0 }; // gamepad button -> gb code
+const STICK = 0.5;
+let padCount = 0;
+function pollGamepads() {
+  if (!navigator.getGamepads) return;
+  const want = new Set();
+  let n = 0;
+  for (const gp of navigator.getGamepads()) {
+    if (!gp || !gp.connected) continue;
+    n++;
+    for (const [i, code] of Object.entries(PAD_BUTTONS)) if (gp.buttons[i]?.pressed) want.add(code);
+    const [x = 0, y = 0] = gp.axes;
+    if (x > STICK) want.add(0); else if (x < -STICK) want.add(1);
+    if (y > STICK) want.add(3); else if (y < -STICK) want.add(2);
+  }
+  if (n !== padCount) { padCount = n; if (n) startAudio(); setStatus(n ? `Gamepad connected (${n})` : 'Gamepad disconnected'); }
+  for (let code = 0; code < 8; code++) {
+    if (want.has(code) !== padHeld.has(code)) {
+      want.has(code) ? padHeld.add(code) : padHeld.delete(code);
+      refreshButton(code);
+    }
+  }
+}
+addEventListener('gamepadconnected', pollGamepads);
+addEventListener('gamepaddisconnected', pollGamepads);
 
 const rw = $('rw');
 rw.addEventListener('pointerdown', (e) => { e.preventDefault(); rw.setPointerCapture(e.pointerId); rewindTouch = true; rw.classList.add('on'); });
@@ -266,6 +360,7 @@ function pushAudio() {
 
 function tick(now) {
   requestAnimationFrame(tick);
+  pollGamepads();
   if (!emu || paused) { lastTime = 0; return; }
   if (!lastTime) lastTime = now;
   acc += now - lastTime;
@@ -310,6 +405,24 @@ function tick(now) {
     loadRom,
     set rewind(v) { rewindKey = v; },
     press: (code, down) => { emu?.set_button(code, down); },
+    get padHeld() { return [...padHeld]; },
+    dpadDirections,
+    applyCheats,
   };
   window.gbdebug.ready = true;
 })();
+
+// ---------- PWA ----------
+let installPrompt = null;
+addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; $('install').hidden = false; });
+addEventListener('appinstalled', () => { installPrompt = null; $('install').hidden = true; });
+$('install').addEventListener('click', async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  $('install').hidden = true;
+});
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('sw.js').catch((e) => console.warn('service worker registration failed', e));
+}

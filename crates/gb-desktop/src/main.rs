@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 const USAGE: &str =
     "usage: gbemu <rom.gb> [--scale N] [--palette gray|dmg-green|pocket] [--model dmg|cgb|auto] [--mute]\n\
     \x20             [--screenshot-at-frame N --screenshot out.png] [--exit-after-frames N]\n\
-    \x20             [--input-script FILE]\n\
+    \x20             [--input-script FILE] [--cheat CODE]...\n\
     keys: F1..F4 save state slot 1..4, Shift+F1..F4 load it (<rom>.ss1..ss4), hold Q to rewind";
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
@@ -30,6 +30,7 @@ struct Args {
     screenshot: Option<PathBuf>,
     exit_after: Option<u64>,
     input_script: Option<PathBuf>,
+    cheats: Vec<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -45,6 +46,7 @@ fn parse_args() -> Result<Args, String> {
         screenshot: None,
         exit_after: None,
         input_script: None,
+        cheats: Vec::new(),
     };
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -66,6 +68,11 @@ fn parse_args() -> Result<Args, String> {
             }
             "--screenshot" => a.screenshot = Some(value(&arg)?.into()),
             "--exit-after-frames" => a.exit_after = Some(value(&arg)?.parse().map_err(|_| "bad --exit-after-frames")?),
+            "--cheat" => {
+                let code = value("--cheat")?;
+                gb_core::Cheat::parse(&code).map_err(|e| e.to_string())?;
+                a.cheats.push(code);
+            }
             "--input-script" => a.input_script = Some(value(&arg)?.into()),
             "-h" | "--help" => return Err(String::new()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
@@ -157,9 +164,13 @@ fn power_on(
     model: Option<gb_core::Model>,
     sav: &Path,
     sample_rate: u32,
+    cheats: &[String],
 ) -> Result<(GameBoy, Saver), String> {
     let mut gb = GameBoy::with_model_choice(rom.to_vec(), model).map_err(|e| e.to_string())?;
     gb.set_sample_rate(sample_rate);
+    for c in cheats {
+        gb.add_cheat(c).map_err(|e| e.to_string())?;
+    }
     let mut last = Vec::new();
     if gb.cartridge().has_battery() {
         if let Ok(data) = std::fs::read(sav) {
@@ -309,7 +320,7 @@ fn run(args: Args) -> Result<(), String> {
     };
     let sample_rate = audio.as_ref().map_or(44_100, |a| a.sample_rate);
     let sav = args.rom.with_extension("sav");
-    let (mut gb, mut saver) = power_on(&rom, args.model, &sav, sample_rate)?;
+    let (mut gb, mut saver) = power_on(&rom, args.model, &sav, sample_rate, &args.cheats)?;
 
     let title = gb.cartridge().title();
     let title = if title.trim().is_empty() {
@@ -343,7 +354,7 @@ fn run(args: Args) -> Result<(), String> {
         }
         if window.is_key_pressed(Key::R, KeyRepeat::No) {
             saver.flush(&gb);
-            (gb, saver) = power_on(&rom, args.model, &sav, sample_rate)?;
+            (gb, saver) = power_on(&rom, args.model, &sav, sample_rate, &args.cheats)?;
             rewind.clear();
             applied = [false; 8];
             frames = 0;

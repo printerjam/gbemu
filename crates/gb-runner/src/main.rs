@@ -1,5 +1,6 @@
 //! `gbtest`: headless test-ROM runner and project scoreboard.
 
+mod bench;
 mod exec;
 mod extra;
 mod image;
@@ -19,6 +20,7 @@ usage:
   gbtest [--roms DIR] [--suite NAME]... [--filter SUBSTR] [-j N] [--long] [--wall SECS]
          [--markdown] [--json] [--screenshots DIR] [--list]
   gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--wav out.wav] [--until-ldbb] [--model dmg|cgb|auto] [--peek HEXADDR[+LEN]]... [--until-pc HEXADDR]
+  gbtest bench <rom> [--frames N] [--model dmg|cgb|auto]
   gbtest trace <rom> [--steps N] [--doctor]
 
 suites: blargg, mooneye, mooneye-mbc, acid2, mbc3, cgb (scored); every other suite is not scored; see --list
@@ -104,6 +106,11 @@ fn main() {
     if args.peek().map(String::as_str) == Some("run") {
         args.next();
         run_single(args);
+        return;
+    }
+    if args.peek().map(String::as_str) == Some("bench") {
+        args.next();
+        bench::run(args);
         return;
     }
     if args.peek().map(String::as_str) == Some("trace") {
