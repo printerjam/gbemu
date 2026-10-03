@@ -309,7 +309,8 @@ impl Bus {
             0xFF4F | 0xFF68..=0xFF6C => self.ppu.read_reg(addr),
             0xFF72 | 0xFF73 => self.undoc[(addr - 0xFF72) as usize],
             0xFF75 => 0x8F | self.undoc[3],
-            0xFF76 | 0xFF77 => 0x00,
+            0xFF76 => self.apu.pcm12(),
+            0xFF77 => self.apu.pcm34(),
             // Unmapped in DMG compatibility mode.
             _ if !cgb_mode => 0xFF,
             0xFF4D => 0x7E | (self.double_speed as u8) << 7 | self.key1_armed as u8,
@@ -464,6 +465,11 @@ impl Bus {
                 self.int_flag |= self.serial.clock(before, self.timer.div_counter());
             }
             0xFF0F => self.int_flag = val & 0x1F,
+            0xFF26 => {
+                let mask = if self.double_speed { 0x2000 } else { 0x1000 };
+                self.apu.set_div_bit(self.timer.div_counter() & mask != 0);
+                self.apu.write(addr, val)
+            }
             0xFF10..=0xFF3F => self.apu.write(addr, val),
             0xFF46 => {
                 self.dma.reg = val;

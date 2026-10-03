@@ -31,12 +31,44 @@ const DUTY: [[u8; 8]; 4] = [
 struct Envelope {
     volume: u8,
     timer: u8,
+    /// Still doing automatic updates (cleared when the volume reaches its limit).
+    active: bool,
 }
 
 impl Envelope {
     fn trigger(&mut self, nrx2: u8) {
         self.volume = nrx2 >> 4;
         self.timer = Self::period(nrx2);
+        self.active = true;
+    }
+    /// NRx2 written while the channel plays ("zombie mode"): the volume is bumped depending on the old value.
+    fn zombie_write(&mut self, old: u8, new: u8, cgb: bool) {
+        let mut v = self.volume as i32;
+        let invert = (old ^ new) & 8 != 0;
+        if cgb {
+            let tick = new & 7 != 0 && old & 7 == 0;
+            if invert {
+                // Fitted to SameSuite channel_*_volume: going to add mode costs 1 (2 if the old period was nonzero),
+                // going to subtract mode costs 1 only when the envelope would also have ticked.
+                v = if new & 8 != 0 {
+                    16 - v - if old & 7 == 0 { 1 } else { 2 }
+                } else {
+                    16 - v - tick as i32
+                };
+            } else if tick || (new & 0xF == 8 && old & 0xF == 8) {
+                v += if new & 8 != 0 { 1 } else { -1 };
+            }
+        } else {
+            if old & 7 == 0 && self.active {
+                v += 1;
+            } else if old & 8 == 0 {
+                v += 2;
+            }
+            if invert {
+                v = 16 - v;
+            }
+        }
+        self.volume = (v & 15) as u8;
     }
     fn period(nrx2: u8) -> u8 {
         match nrx2 & 7 {
@@ -55,8 +87,12 @@ impl Envelope {
                 if self.volume < 15 {
                     self.volume += 1;
                 }
-            } else if self.volume > 0 {
-                self.volume -= 1;
+                self.active = self.volume < 15;
+            } else {
+                if self.volume > 0 {
+                    self.volume -= 1;
+                }
+                self.active = self.volume > 0;
             }
         }
     }
@@ -67,6 +103,8 @@ struct Square {
     enabled: bool,
     timer: u32,
     pos: u8,
+    /// Duty output bit latched when the position last advanced (duty changes apply from the next step).
+    out: u8,
     len: u16,
     env: Envelope,
     // sweep (channel 1 only)
@@ -82,6 +120,7 @@ impl Square {
             enabled: false,
             timer: NEVER,
             pos: 0,
+            out: 0,
             len: 0,
             env: Envelope::default(),
             shadow: 0,
@@ -98,6 +137,19 @@ pub struct Apu {
     /// length counters cleared by power-off and locked while off.
     #[serde(default)]
     cgb: bool,
+    /// DIV bit that clocks the frame sequencer, sampled by the bus just before an NR52 write.
+    #[serde(skip)]
+    div_bit: bool,
+    /// Powered on while the DIV bit was high: the first frame sequencer event is skipped.
+    skip_fs: bool,
+    #[serde(skip)]
+    ds: bool,
+    /// After such a power-on the sequencer behaves as if its next step were odd until the first event runs.
+    #[serde(skip)]
+    fs_quirk_odd: bool,
+    /// Cycle counter value when the APU was last powered on: the 1 MHz channel clock phase restarts there.
+    #[serde(skip)]
+    power_on_at: u64,
     /// Number of times the mixed output level changed (test-harness probe: "was the output silent/constant").
     #[serde(skip)]
     level_changes: u64,
@@ -150,6 +202,11 @@ impl Apu {
             wave_ram: [0; 16],
             sample_rate: 48_000,
             cgb: false,
+            power_on_at: 0,
+            div_bit: false,
+            skip_fs: false,
+            ds: false,
+            fs_quirk_odd: false,
             level_changes: 0,
             power: true,
             fs: 0,
@@ -195,14 +252,17 @@ impl Apu {
 
     /// Advance `t_cycles` T-cycles.
     pub fn tick(&mut self, t_cycles: u32) {
+        self.ds = t_cycles < 4;
         let mut remaining = t_cycles;
         let rate = self.sample_rate as u64;
         while remaining > 0 {
             let to_sample = (CLOCK - self.phase).div_ceil(rate).max(1) as u32;
             let mut chunk = remaining.min(to_sample);
+            // A disabled square channel's frequency timer is frozen (its duty position is kept).
+            let (run1, run2) = (self.ch1.enabled, self.ch2.enabled);
             chunk = chunk
-                .min(self.ch1.timer)
-                .min(self.ch2.timer)
+                .min(if run1 { self.ch1.timer } else { NEVER })
+                .min(if run2 { self.ch2.timer } else { NEVER })
                 .min(self.ch3_timer)
                 .min(self.ch4_timer);
 
@@ -214,19 +274,21 @@ impl Apu {
             remaining -= chunk;
 
             let mut changed = false;
-            if self.ch1.timer != NEVER {
+            if run1 && self.ch1.timer != NEVER {
                 self.ch1.timer -= chunk;
                 if self.ch1.timer == 0 {
                     self.ch1.timer = self.square_period(0);
                     self.ch1.pos = (self.ch1.pos + 1) & 7;
+                    self.ch1.out = DUTY[(self.regs[0x01] >> 6) as usize][self.ch1.pos as usize];
                     changed = true;
                 }
             }
-            if self.ch2.timer != NEVER {
+            if run2 && self.ch2.timer != NEVER {
                 self.ch2.timer -= chunk;
                 if self.ch2.timer == 0 {
                     self.ch2.timer = self.square_period(5);
                     self.ch2.pos = (self.ch2.pos + 1) & 7;
+                    self.ch2.out = DUTY[(self.regs[0x06] >> 6) as usize][self.ch2.pos as usize];
                     changed = true;
                 }
             }
@@ -282,6 +344,11 @@ impl Apu {
         if !self.power {
             return;
         }
+        if self.skip_fs {
+            self.skip_fs = false;
+            return;
+        }
+        self.fs_quirk_odd = false;
         let step = self.fs;
         self.fs = (self.fs + 1) & 7;
         if step & 1 == 0 {
@@ -303,6 +370,11 @@ impl Apu {
             }
         }
         self.update_levels();
+    }
+
+    /// The next sequencer step does not clock the length counters (so enabling a length now clocks it once).
+    fn fs_odd(&self) -> bool {
+        self.fs & 1 == 1 || self.fs_quirk_odd
     }
 
     fn clock_lengths(&mut self) {
@@ -378,6 +450,23 @@ impl Apu {
         (2048 - f) * 4
     }
 
+    /// Time to the first duty step after a trigger (CGB): the period plus two ticks (one if the channel was already
+    /// running), rounded up to the next edge of the 1 MHz channel clock, which restarts at power-on. In double
+    /// speed the extra ticks are dropped: SameSuite (CGB-E) wants them, Gambatte (CGB-C) does not, and we follow
+    /// Gambatte there, as SameBoy does for pre-D revisions.
+    fn square_start(&self, base: usize, active: bool) -> u32 {
+        if !self.cgb {
+            return self.square_period(base);
+        }
+        let t = self.square_period(base) + if active { 4 } else { 8 };
+        let delta = (4 - ((self.cycles.wrapping_sub(self.power_on_at) as u32 + t) & 3)) % 4;
+        if self.ds {
+            t - 8 + delta
+        } else {
+            t + delta
+        }
+    }
+
     fn wave_period(&self) -> u32 {
         let f = self.regs[0x0D] as u32 | ((self.regs[0x0E] as u32 & 7) << 8);
         (2048 - f) * 2
@@ -423,25 +512,21 @@ impl Apu {
         }
     }
 
-    fn update_levels(&mut self) {
-        if !self.power {
-            if self.level_l != 0.0 || self.level_r != 0.0 {
-                self.level_changes += 1;
-            }
-            self.level_l = 0.0;
-            self.level_r = 0.0;
-            return;
-        }
-        let sq = |c: &Square, nrx1: u8, nrx2: u8| {
-            let d = if c.enabled {
-                DUTY[(nrx1 >> 6) as usize][c.pos as usize] * c.env.volume
+    /// Current 4-bit digital output of each channel (before the DAC), as exposed by PCM12/PCM34.
+    fn digital(&self) -> [u8; 4] {
+        let cgb = self.cgb;
+        let sq = |c: &Square, nrx1: u8| {
+            let bit = if cgb {
+                c.out
+            } else {
+                DUTY[(nrx1 >> 6) as usize][c.pos as usize]
+            };
+            if c.enabled {
+                bit * c.env.volume
             } else {
                 0
-            };
-            Self::dac(nrx2 & 0xF8 != 0, d)
+            }
         };
-        let o1 = sq(&self.ch1, self.regs[0x01], self.regs[0x02]);
-        let o2 = sq(&self.ch2, self.regs[0x06], self.regs[0x07]);
         let d3 = if self.ch3_enabled {
             match (self.regs[0x0C] >> 5) & 3 {
                 0 => 0,
@@ -452,13 +537,44 @@ impl Apu {
         } else {
             0
         };
-        let o3 = Self::dac(self.regs[0x0A] & 0x80 != 0, d3);
         let d4 = if self.ch4_enabled && self.ch4_lfsr & 1 == 0 {
             self.ch4_env.volume
         } else {
             0
         };
-        let o4 = Self::dac(self.regs[0x11] & 0xF8 != 0, d4);
+        [sq(&self.ch1, self.regs[0x01]), sq(&self.ch2, self.regs[0x06]), d3, d4]
+    }
+
+    /// CGB PCM12 (0xFF76): channel 1 in the low nibble, channel 2 in the high nibble.
+    pub fn pcm12(&self) -> u8 {
+        let d = self.digital();
+        d[0] | d[1] << 4
+    }
+
+    /// CGB PCM34 (0xFF77): channel 3 in the low nibble, channel 4 in the high nibble.
+    pub fn pcm34(&self) -> u8 {
+        let d = self.digital();
+        d[2] | d[3] << 4
+    }
+
+    fn update_levels(&mut self) {
+        if !self.power {
+            if self.level_l != 0.0 || self.level_r != 0.0 {
+                self.level_changes += 1;
+            }
+            self.level_l = 0.0;
+            self.level_r = 0.0;
+            return;
+        }
+        let d = self.digital();
+        let dac_on = [
+            self.regs[0x02] & 0xF8 != 0,
+            self.regs[0x07] & 0xF8 != 0,
+            self.regs[0x0A] & 0x80 != 0,
+            self.regs[0x11] & 0xF8 != 0,
+        ];
+        let o: Vec<f32> = (0..4).map(|i| Self::dac(dac_on[i], d[i])).collect();
+        let (o1, o2, o3, o4) = (o[0], o[1], o[2], o[3]);
         let outs = [o1, o2, o3, o4];
         let nr51 = self.regs[0x15];
         let nr50 = self.regs[0x14];
@@ -547,7 +663,7 @@ impl Apu {
             }
             return;
         }
-        let odd = self.fs & 1 == 1;
+        let odd = self.fs_odd();
         match i {
             0x00 => {
                 if self.regs[0] & 8 != 0 && val & 8 == 0 && self.ch1.negate_used {
@@ -572,6 +688,13 @@ impl Apu {
                 self.ch4_len = 64 - (val & 63) as u16;
             }
             0x02 | 0x07 | 0x11 => {
+                let old = self.regs[i];
+                match i {
+                    0x02 if self.ch1.enabled => self.ch1.env.zombie_write(old, val, self.cgb),
+                    0x07 if self.ch2.enabled => self.ch2.env.zombie_write(old, val, self.cgb),
+                    0x11 if self.ch4_enabled => self.ch4_env.zombie_write(old, val, self.cgb),
+                    _ => {}
+                }
                 self.regs[i] = val;
                 if val & 0xF8 == 0 {
                     match i {
@@ -585,6 +708,7 @@ impl Apu {
                 self.regs[i] = val;
                 if val & 0x80 == 0 {
                     self.ch3_enabled = false;
+                    self.ch3_sample = 0;
                 }
             }
             0x04 | 0x09 | 0x0E | 0x13 => {
@@ -662,9 +786,14 @@ impl Apu {
             self.power = false;
         } else {
             self.power = true;
+            self.power_on_at = self.cycles;
+            self.skip_fs = self.div_bit;
+            self.fs_quirk_odd = self.div_bit;
             self.fs = 0;
             self.ch1.pos = 0;
             self.ch2.pos = 0;
+            self.ch1.out = 0;
+            self.ch2.out = 0;
             self.ch3_pos = 0;
         }
         self.update_levels();
@@ -677,11 +806,15 @@ impl Apu {
         let dac = self.regs[0x02] & 0xF8 != 0;
         if self.ch1.len == 0 {
             self.ch1.len = 64;
-            if self.regs[0x04] & 0x40 != 0 && self.fs & 1 == 1 {
+            if self.regs[0x04] & 0x40 != 0 && self.fs_odd() {
                 self.ch1.len -= 1;
             }
         }
-        self.ch1.timer = self.square_period(0);
+        self.ch1.timer = self.square_start(0, self.ch1.enabled);
+        if self.ch1.enabled {
+            // Restarting an active channel re-evaluates the duty output immediately.
+            self.ch1.out = DUTY[(self.regs[0x01] >> 6) as usize][self.ch1.pos as usize];
+        }
         self.ch1.env.trigger(self.regs[0x02]);
         self.ch1.shadow = self.regs[0x03] as u16 | ((self.regs[0x04] as u16 & 7) << 8);
         let period = (nr10 >> 4) & 7;
@@ -698,11 +831,14 @@ impl Apu {
         let dac = self.regs[0x07] & 0xF8 != 0;
         if self.ch2.len == 0 {
             self.ch2.len = 64;
-            if self.regs[0x09] & 0x40 != 0 && self.fs & 1 == 1 {
+            if self.regs[0x09] & 0x40 != 0 && self.fs_odd() {
                 self.ch2.len -= 1;
             }
         }
-        self.ch2.timer = self.square_period(5);
+        self.ch2.timer = self.square_start(5, self.ch2.enabled);
+        if self.ch2.enabled {
+            self.ch2.out = DUTY[(self.regs[0x06] >> 6) as usize][self.ch2.pos as usize];
+        }
         self.ch2.env.trigger(self.regs[0x07]);
         self.ch2.enabled = dac;
     }
@@ -711,7 +847,7 @@ impl Apu {
         let dac = self.regs[0x0A] & 0x80 != 0;
         if self.ch3_len == 0 {
             self.ch3_len = 256;
-            if self.regs[0x0E] & 0x40 != 0 && self.fs & 1 == 1 {
+            if self.regs[0x0E] & 0x40 != 0 && self.fs_odd() {
                 self.ch3_len -= 1;
             }
         }
@@ -736,7 +872,7 @@ impl Apu {
         let dac = self.regs[0x11] & 0xF8 != 0;
         if self.ch4_len == 0 {
             self.ch4_len = 64;
-            if self.regs[0x13] & 0x40 != 0 && self.fs & 1 == 1 {
+            if self.regs[0x13] & 0x40 != 0 && self.fs_odd() {
                 self.ch4_len -= 1;
             }
         }
@@ -755,6 +891,11 @@ impl Apu {
     /// Count of mixed-output level changes since power-on; constant across an interval means silence/DC.
     pub fn level_changes(&self) -> u64 {
         self.level_changes
+    }
+
+    /// Tell the APU the state of the frame-sequencer DIV bit (called by the bus before NR52 writes).
+    pub fn set_div_bit(&mut self, high: bool) {
+        self.div_bit = high;
     }
 
     /// Select CGB (true) or DMG (false) APU behaviour.
@@ -922,5 +1063,57 @@ mod tests {
         let expect = CLOCK as f32 / 9536.0;
         assert!((hz - expect).abs() < 2.0, "hz {hz} expect {expect}");
         assert!(left.iter().all(|s| s.abs() <= 1.0));
+    }
+
+    #[test]
+    fn pcm12_exposes_digital_square_output() {
+        let mut a = Apu::new();
+        a.set_cgb(true);
+        a.write(0xFF26, 0x00);
+        a.write(0xFF26, 0x80);
+        a.write(0xFF16, 0x80); // 50% duty
+        a.write(0xFF17, 0xF0); // volume 15
+        a.write(0xFF18, 0xFC);
+        a.write(0xFF19, 0x87); // period 16 T
+        let mut seen = [false; 16];
+        for _ in 0..64 {
+            a.tick(4);
+            let v = a.pcm12();
+            assert_eq!(v & 0x0F, 0, "channel 1 is silent");
+            seen[(v >> 4) as usize] = true;
+        }
+        assert!(seen[0] && seen[15], "output alternates between 0 and the volume");
+        assert_eq!(a.pcm34(), 0);
+    }
+
+    #[test]
+    fn powering_on_while_div_bit_is_high_skips_the_first_sequencer_event() {
+        let run = |div_high: bool| {
+            let mut a = Apu::new();
+            a.write(0xFF26, 0x00);
+            a.set_div_bit(div_high);
+            a.write(0xFF26, 0x80);
+            a.write(0xFF17, 0xF0);
+            a.write(0xFF16, 63); // length 1
+            a.write(0xFF19, 0xC0);
+            a.frame_sequencer_step();
+            a.read(0xFF26) & 2
+        };
+        assert_eq!(run(false), 0, "step 0 clocks the length");
+        assert_eq!(run(true), 2, "the first event is skipped");
+    }
+
+    #[test]
+    fn cgb_envelope_write_zombie_mode() {
+        let mut a = Apu::new();
+        a.set_cgb(true);
+        a.write(0xFF26, 0x00);
+        a.write(0xFF26, 0x80);
+        a.write(0xFF17, 0x48); // volume 4, add mode, period 0
+        a.write(0xFF19, 0x80);
+        a.write(0xFF17, 0x49); // period 0 -> 1 while running: one extra tick (+1)
+        assert_eq!(a.ch2.env.volume, 5);
+        a.write(0xFF17, 0x41); // add -> subtract inverts: 16 - 5
+        assert_eq!(a.ch2.env.volume, 11);
     }
 }
