@@ -6,6 +6,8 @@ with dot-accurate mode timing, four-channel APU, timer, serial, joypad, MBC1/2/3
 desktop window, a terminal, a TUI debugger, a headless test runner and a WebAssembly build.
 It passes all 152 scored test ROMs (blargg, mooneye, acid2, CGB, MBC suites) and plays real homebrew.
 
+Documentation: [how it works](docs/ARCHITECTURE.md) · [how it was built](docs/DEVLOG.md) · `PLAN.md` · `PROGRESS.md`.
+
 **Try it in the browser: <https://printerjam.github.io/gbemu/>** (bring your own ROM; nothing is uploaded).
 
 <p align="center">
