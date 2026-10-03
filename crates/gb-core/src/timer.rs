@@ -5,11 +5,13 @@
 //! 0 for one M-cycle, then reloads TMA and raises the interrupt.
 
 use crate::irq;
+use serde::{Deserialize, Serialize};
 
 /// Empirical: a TAC write evaluates the falling-edge check against the divider two M-cycles
 /// later than the tick-then-write model implies (mooneye timer/rapid_toggle needs exactly this).
 const AHEAD: u16 = 8;
 
+#[derive(Serialize, Deserialize)]
 pub struct Timer {
     /// Internal 16-bit divider; DIV (0xFF04) is the upper byte.
     div: u16,

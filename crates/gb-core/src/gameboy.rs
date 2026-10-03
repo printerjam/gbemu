@@ -5,7 +5,9 @@ use crate::cartridge::{CartError, Cartridge};
 use crate::cpu::{Cpu, Registers};
 use crate::joypad::Button;
 use crate::{Model, CYCLES_PER_FRAME};
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct GameBoy {
     pub cpu: Cpu,
     pub bus: Bus,

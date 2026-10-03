@@ -50,7 +50,8 @@ pub fn run_case(case: &TestCase, wall_limit: Duration) -> TestResult {
         Ok(o) => o,
         Err(_) => Outcome::Fail(format!("panic: {}", PANIC_INFO.with(|p| p.borrow().clone()))),
     };
-    let keep = matches!(outcome, Outcome::Fail(_)) || matches!(case.detect, Detect::Acid2 { .. });
+    let keep =
+        matches!(outcome, Outcome::Fail(_)) || matches!(case.detect, Detect::Acid2 { .. } | Detect::Screen { .. });
     TestResult {
         outcome,
         elapsed: start.elapsed(),
@@ -72,6 +73,7 @@ fn execute(case: &TestCase, wall_limit: Duration, fb_out: &mut Option<Vec<u32>>)
         Detect::Blargg { reference } => run_blargg(&mut gb, limit, wall_limit, reference.as_deref()),
         Detect::Mooneye => run_mooneye(&mut gb, limit, wall_limit),
         Detect::Acid2 { reference } => run_acid2(&mut gb, limit, wall_limit, reference),
+        Detect::Screen { reference, buttons } => run_screen(&mut gb, limit, wall_limit, reference, buttons),
     };
     *fb_out = Some(gb.framebuffer().to_vec());
     outcome
@@ -244,5 +246,47 @@ fn run_acid2(gb: &mut GameBoy, limit: u64, wall: Duration, reference: &std::path
     match diff_pixels(gb.framebuffer(), &img, SCREEN_WIDTH, SCREEN_HEIGHT) {
         0 => Outcome::Pass,
         d => Outcome::Fail(format!("{d} px differ")),
+    }
+}
+
+fn run_screen(
+    gb: &mut GameBoy,
+    limit: u64,
+    wall: Duration,
+    reference: &std::path::Path,
+    buttons: &[gb_core::Button],
+) -> Outcome {
+    let img = match load_png(reference) {
+        Ok(i) => i,
+        Err(e) => return Outcome::Fail(e),
+    };
+    let mut frame = 0u64;
+    let r = drive(
+        gb,
+        limit,
+        wall,
+        |_, _| None,
+        |gb| {
+            frame += 1;
+            if frame >= 30 {
+                let t = frame - 30;
+                if let Some(&b) = buttons.get((t / 10) as usize) {
+                    match t % 10 {
+                        0 => gb.set_button(b, true),
+                        5 => gb.set_button(b, false),
+                        _ => {}
+                    }
+                }
+            }
+            let done = frame >= 30 + 10 * buttons.len() as u64 + 10;
+            (done && diff_pixels(gb.framebuffer(), &img, SCREEN_WIDTH, SCREEN_HEIGHT) == 0).then_some(Outcome::Pass)
+        },
+    );
+    match r {
+        Ok(o) => o,
+        Err(kind) => {
+            let d = diff_pixels(gb.framebuffer(), &img, SCREEN_WIDTH, SCREEN_HEIGHT);
+            Outcome::Fail(format!("{kind} after {frame} frames, {d} px differ"))
+        }
     }
 }

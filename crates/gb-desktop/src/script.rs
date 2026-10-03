@@ -1,12 +1,19 @@
-//! `--input-script` parser: lines of `frame button down|up`, `#` comments.
+//! `--input-script` parser: lines of `frame button down|up`, `frame save N` or `frame load N`
+//! (state slots 1..=4), `#` comments.
 
 use gb_core::Button;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Button { button: Button, pressed: bool },
+    Save(u8),
+    Load(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Event {
     pub frame: u64,
-    pub button: Button,
-    pub pressed: bool,
+    pub action: Action,
 }
 
 pub fn parse_button(name: &str) -> Option<Button> {
@@ -34,16 +41,31 @@ pub fn parse(text: &str) -> Result<Vec<Event>, String> {
         let err = |msg: &str| format!("input script line {}: {msg}", n + 1);
         let parts: Vec<&str> = line.split_whitespace().collect();
         let [frame, button, action] = parts[..] else {
-            return Err(err("expected `frame button down|up`"));
+            return Err(err("expected `frame button down|up` or `frame save|load N`"));
         };
         let frame = frame.parse().map_err(|_| err("bad frame number"))?;
-        let button = parse_button(button).ok_or_else(|| err("unknown button"))?;
-        let pressed = match action {
-            "down" => true,
-            "up" => false,
-            _ => return Err(err("expected down or up")),
+        let action = match button {
+            "save" | "load" => {
+                let slot: u8 = action.parse().map_err(|_| err("bad slot"))?;
+                if !(1..=4).contains(&slot) {
+                    return Err(err("slot must be 1..4"));
+                }
+                if button == "save" {
+                    Action::Save(slot)
+                } else {
+                    Action::Load(slot)
+                }
+            }
+            _ => Action::Button {
+                button: parse_button(button).ok_or_else(|| err("unknown button"))?,
+                pressed: match action {
+                    "down" => true,
+                    "up" => false,
+                    _ => return Err(err("expected down or up")),
+                },
+            },
         };
-        events.push(Event { frame, button, pressed });
+        events.push(Event { frame, action });
     }
     events.sort_by_key(|e| e.frame);
     Ok(events)
@@ -61,11 +83,23 @@ mod tests {
             ev[0],
             Event {
                 frame: 120,
-                button: Button::Start,
-                pressed: true
+                action: Action::Button {
+                    button: Button::Start,
+                    pressed: true
+                }
             }
         );
-        assert!(!ev[1].pressed);
+        assert!(matches!(ev[1].action, Action::Button { pressed: false, .. }));
+    }
+
+    #[test]
+    fn parses_state_slots() {
+        let ev = parse("10 save 2\n5 load 4").unwrap();
+        assert_eq!(ev[0].action, Action::Load(4));
+        assert_eq!(ev[1].action, Action::Save(2));
+        assert!(parse("1 save 0").is_err());
+        assert!(parse("1 load 5").is_err());
+        assert!(parse("1 save x").is_err());
     }
 
     #[test]

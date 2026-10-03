@@ -6,6 +6,7 @@
 
 use crate::irq;
 use crate::{SCREEN_HEIGHT, SCREEN_WIDTH};
+use serde::{Deserialize, Serialize};
 
 const DOTS_PER_LINE: u16 = 456;
 const LINES: u8 = 154;
@@ -45,7 +46,7 @@ fn cgb_rgb(c: u16) -> u32 {
 
 pub const DEFAULT_PALETTE: [u32; 4] = [0x00FF_FFFF, 0x00AA_AAAA, 0x0055_5555, 0x0000_0000];
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
 struct Sprite {
     y: u8,
     x: u8,
@@ -53,13 +54,21 @@ struct Sprite {
     flags: u8,
 }
 
+fn default_palette() -> [u32; 4] {
+    DEFAULT_PALETTE
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Ppu {
     /// Both VRAM banks back to back (bank 1 is only used on CGB).
     vram: Vec<u8>,
+    #[serde(with = "crate::state::bytes")]
     oam: [u8; 0xA0],
     regs: [u8; 12],
     framebuffer: Vec<u32>,
     frame_ready: bool,
+    /// Host display setting, not machine state (kept across state loads).
+    #[serde(skip, default = "default_palette")]
     palette: [u32; 4],
 
     /// Current line (raw; LY register applies the line-153 quirk).
@@ -103,7 +112,9 @@ pub struct Ppu {
     ocps: u8,
     /// OPRI bit 0: 1 = DMG-style X-coordinate sprite priority.
     opri: u8,
+    #[serde(with = "crate::state::bytes")]
     bg_pal: [u8; 64],
+    #[serde(with = "crate::state::bytes")]
     obj_pal: [u8; 64],
     /// Palette RAM expanded to 0x00RRGGBB.
     bg_rgb: [u32; 32],
@@ -188,6 +199,10 @@ impl Ppu {
 
     /// Replace the four output shades (index = DMG color 0..3). Default is
     /// exact grayscale; affects only lines rendered afterwards.
+    pub fn palette(&self) -> [u32; 4] {
+        self.palette
+    }
+
     pub fn set_palette(&mut self, palette: [u32; 4]) {
         self.palette = palette;
     }

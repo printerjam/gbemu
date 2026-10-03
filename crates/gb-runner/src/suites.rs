@@ -11,6 +11,12 @@ pub enum Detect {
     Mooneye,
     /// `LD B,B`, then a few frames, then pixel-exact comparison.
     Acid2 { reference: PathBuf },
+    /// Press `buttons` in order (each held 5 frames, after a 30-frame startup delay), then pixel-compare the screen
+    /// against `reference` once per frame until it matches or the time limit passes.
+    Screen {
+        reference: PathBuf,
+        buttons: Vec<gb_core::Button>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -21,7 +27,7 @@ pub struct TestCase {
     pub detect: Detect,
     /// Emulated time limit in seconds.
     pub seconds: f64,
-    /// Hardware to emulate; `None` = whatever the cartridge header asks for.
+    /// Hardware to emulate; `None` = whatever the cartridge header asks for. DMG suites pin `Dmg`.
     pub model: Option<Model>,
 }
 
@@ -55,6 +61,10 @@ pub const SUITES: &[SuiteInfo] = &[
     SuiteInfo {
         name: "cgb-extra",
         scored: false,
+    },
+    SuiteInfo {
+        name: "mbc3",
+        scored: true,
     },
     SuiteInfo {
         name: "blargg-extra",
@@ -129,7 +139,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
             rom,
             detect: Detect::Blargg { reference },
             seconds: secs,
-            model: None,
+            model: Some(Model::Dmg),
         });
     };
     for p in walk_gb(&b.join("cpu_instrs/individual")) {
@@ -176,7 +186,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
 
     // blargg-extra (not scored)
     for p in walk_gb(&b.join("dmg_sound/rom_singles")) {
-        blargg(&mut cases, "blargg-extra", p, None, 15.0);
+        blargg(&mut cases, "blargg-extra", p, None, 30.0);
     }
     blargg(
         &mut cases,
@@ -209,7 +219,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
                 rom: p,
                 detect: Detect::Mooneye,
                 seconds: mooneye_secs,
-                model: None,
+                model: Some(Model::Dmg),
             });
         }
     }
@@ -223,7 +233,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
                 rom: p,
                 detect: Detect::Mooneye,
                 seconds: mooneye_secs,
-                model: None,
+                model: Some(Model::Dmg),
             });
         }
     }
@@ -240,7 +250,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
                 reference: a.join("dmg-acid2-dmg.png"),
             },
             seconds: 10.0,
-            model: None,
+            model: Some(Model::Dmg),
         });
     }
     // cgb: CGB-model runs (blargg DMG ROMs run in CGB compatibility mode)
@@ -335,6 +345,58 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
             cgb_extra(format!("same-suite/{}", rel_name(&same, &p)), p, Detect::Mooneye, 10.0);
         }
     }
+
+    // MBC3: screenshots are the DMG references; times from the howtos plus margin.
+    use gb_core::Button::{Down, A};
+    let mbc3 =
+        |cases: &mut Vec<TestCase>, dir: &str, rom: &str, reference: &str, buttons: Vec<gb_core::Button>, secs| {
+            let d = roms.join(dir);
+            if d.join(rom).is_file() {
+                cases.push(TestCase {
+                    suite: "mbc3",
+                    name: reference.strip_suffix("-dmg.png").unwrap_or(reference).to_string(),
+                    rom: d.join(rom),
+                    detect: Detect::Screen {
+                        reference: d.join(reference),
+                        buttons,
+                    },
+                    seconds: secs,
+                    model: Some(Model::Dmg),
+                });
+            }
+        };
+    mbc3(
+        &mut cases,
+        "mbc3-tester",
+        "mbc3-tester.gb",
+        "mbc3-tester-dmg.png",
+        vec![],
+        2.0,
+    );
+    mbc3(
+        &mut cases,
+        "rtc3test",
+        "rtc3test.gb",
+        "rtc3test-basic-tests-dmg.png",
+        vec![A],
+        margin(13.0),
+    );
+    mbc3(
+        &mut cases,
+        "rtc3test",
+        "rtc3test.gb",
+        "rtc3test-range-tests-dmg.png",
+        vec![Down, A],
+        margin(8.0),
+    );
+    mbc3(
+        &mut cases,
+        "rtc3test",
+        "rtc3test.gb",
+        "rtc3test-sub-second-writes-dmg.png",
+        vec![Down, Down, A],
+        margin(26.0),
+    );
     cases
 }
 

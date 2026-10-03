@@ -10,11 +10,13 @@ pub mod gameboy;
 pub mod joypad;
 pub mod ppu;
 pub mod serial;
+pub mod state;
 pub mod timer;
 
 pub use cartridge::{CartError, Cartridge};
 pub use gameboy::GameBoy;
 pub use joypad::Button;
+pub use state::StateError;
 
 /// Hardware model being emulated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

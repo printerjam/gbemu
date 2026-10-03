@@ -11,6 +11,8 @@ pub enum Action {
     Button(Button),
     Quit,
     Pause,
+    SaveState,
+    LoadState,
 }
 
 pub fn map_key(k: &KeyEvent) -> Option<Action> {
@@ -22,6 +24,8 @@ pub fn map_key(k: &KeyEvent) -> Option<Action> {
         KeyCode::Right => Action::Button(Right),
         KeyCode::Enter => Action::Button(Start),
         KeyCode::Backspace | KeyCode::BackTab => Action::Button(Select),
+        KeyCode::F(1) => Action::SaveState,
+        KeyCode::F(2) => Action::LoadState,
         KeyCode::Esc => Action::Quit,
         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
         KeyCode::Char(c) => match c.to_ascii_lowercase() {
@@ -33,6 +37,8 @@ pub fn map_key(k: &KeyEvent) -> Option<Action> {
             'z' | 'j' => Action::Button(B),
             'q' => Action::Quit,
             'p' => Action::Pause,
+            '[' => Action::SaveState,
+            ']' => Action::LoadState,
             _ => return None,
         },
         _ => return None,
@@ -87,6 +93,16 @@ impl Input {
         };
     }
 
+    /// Every button's desired state at `frame`, for re-applying after the machine state was replaced.
+    pub fn resync(&mut self, frame: u64) -> Vec<(Button, bool)> {
+        self.applied = [false; 8];
+        let mut all: Vec<_> = ALL.iter().map(|&b| (b, false)).collect();
+        for (b, pressed) in self.changes(frame) {
+            all[idx(b)].1 = pressed;
+        }
+        all
+    }
+
     /// Button state changes to apply at `frame` (button, pressed).
     pub fn changes(&mut self, frame: u64) -> Vec<(Button, bool)> {
         let mut out = Vec::new();
@@ -135,6 +151,8 @@ mod tests {
         );
         assert_eq!(map_key(&ev(KeyCode::Char('c'), n)), None);
         assert_eq!(map_key(&ev(KeyCode::Esc, n)), Some(Action::Quit));
+        assert_eq!(map_key(&ev(KeyCode::F(1), n)), Some(Action::SaveState));
+        assert_eq!(map_key(&ev(KeyCode::Char(']'), n)), Some(Action::LoadState));
     }
 
     #[test]
@@ -156,5 +174,16 @@ mod tests {
         assert!(i.changes(1000).is_empty());
         i.key(Button::Start, KeyEventKind::Release, 1000);
         assert_eq!(i.changes(1000), [(Button::Start, false)]);
+    }
+
+    #[test]
+    fn resync_reports_every_button_with_current_hold_state() {
+        let mut i = Input::new(true);
+        i.key(Button::A, KeyEventKind::Press, 0);
+        i.changes(0);
+        let all = i.resync(1);
+        assert_eq!(all.len(), 8);
+        assert!(all.contains(&(Button::A, true)));
+        assert_eq!(all.iter().filter(|(_, p)| *p).count(), 1);
     }
 }

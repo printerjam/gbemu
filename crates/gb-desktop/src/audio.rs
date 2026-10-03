@@ -3,13 +3,24 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample, Stream, StreamConfig};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Interleaved stereo samples shared between the emulation thread and the audio callback.
 pub type Ring = Arc<Mutex<VecDeque<f32>>>;
 
+/// Counters updated by the audio callback (for `GBEMU_AUDIO_DEBUG`).
+#[derive(Default)]
+pub struct Stats {
+    /// Stereo frames the device asked for.
+    pub played: AtomicU64,
+    /// Stereo frames the device asked for while the ring was empty (played as silence).
+    pub underrun: AtomicU64,
+}
+
 pub struct Audio {
     _stream: Stream,
+    pub stats: Arc<Stats>,
     pub ring: Ring,
     pub sample_rate: u32,
     /// Fill level (in stereo frames) the pacer tries to maintain.
@@ -27,15 +38,17 @@ impl Audio {
         let sample_rate = config.sample_rate;
         let channels = config.channels as usize;
         let ring: Ring = Arc::new(Mutex::new(VecDeque::new()));
+        let stats = Arc::new(Stats::default());
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(&device, config, channels, ring.clone()),
-            SampleFormat::I16 => build::<i16>(&device, config, channels, ring.clone()),
-            SampleFormat::U16 => build::<u16>(&device, config, channels, ring.clone()),
+            SampleFormat::F32 => build::<f32>(&device, config, channels, ring.clone(), stats.clone()),
+            SampleFormat::I16 => build::<i16>(&device, config, channels, ring.clone(), stats.clone()),
+            SampleFormat::U16 => build::<u16>(&device, config, channels, ring.clone(), stats.clone()),
             other => return Err(format!("unsupported sample format {other}")),
         }?;
         stream.play().map_err(|e| e.to_string())?;
         Ok(Audio {
             _stream: stream,
+            stats,
             ring,
             sample_rate,
             // ~3 video frames of latency (~50 ms).
@@ -61,7 +74,13 @@ impl Audio {
     }
 }
 
-fn build<T>(device: &cpal::Device, config: StreamConfig, channels: usize, ring: Ring) -> Result<Stream, String>
+fn build<T>(
+    device: &cpal::Device,
+    config: StreamConfig,
+    channels: usize,
+    ring: Ring,
+    stats: Arc<Stats>,
+) -> Result<Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -71,9 +90,11 @@ where
             config,
             move |data: &mut [T], _| {
                 let mut ring = ring.lock().unwrap();
+                let mut under = 0;
                 for frame in data.chunks_mut(channels) {
                     let l = ring.pop_front();
                     let r = ring.pop_front();
+                    under += l.is_none() as u64;
                     let (l, r) = (l.unwrap_or(0.0), r.unwrap_or(0.0));
                     for (i, out) in frame.iter_mut().enumerate() {
                         let v = match (channels, i) {
@@ -85,6 +106,10 @@ where
                         *out = T::from_sample(v);
                     }
                 }
+                stats
+                    .played
+                    .fetch_add((data.len() / channels) as u64, Ordering::Relaxed);
+                stats.underrun.fetch_add(under, Ordering::Relaxed);
             },
             err_fn,
             None,

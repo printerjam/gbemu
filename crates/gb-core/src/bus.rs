@@ -9,7 +9,9 @@ use crate::ppu::Ppu;
 use crate::serial::Serial;
 use crate::timer::Timer;
 use crate::Model;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 struct Dma {
     /// Last value written to 0xFF46.
     reg: u8,
@@ -20,6 +22,7 @@ struct Dma {
 }
 
 /// CGB VRAM DMA (FF51-FF55).
+#[derive(Serialize, Deserialize)]
 struct Hdma {
     src: u16,
     dst: u16,
@@ -35,6 +38,7 @@ const CGB_POST_BOOT_DIV: u16 = 0x2674;
 /// M-cycles a speed switch keeps the CPU stopped.
 const SPEED_SWITCH_M_CYCLES: u32 = 2050;
 
+#[derive(Serialize, Deserialize)]
 pub struct Bus {
     pub cart: Cartridge,
     pub ppu: Ppu,
@@ -55,6 +59,7 @@ pub struct Bus {
     /// FF56 (infrared port) and FF72-FF75 scratch registers.
     rp: u8,
     undoc: [u8; 4],
+    #[serde(with = "crate::state::bytes")]
     hram: [u8; 0x7F],
     /// IF (0xFF0F), low 5 bits.
     pub int_flag: u8,

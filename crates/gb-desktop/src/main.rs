@@ -6,6 +6,7 @@ mod script;
 use audio::Audio;
 use gb_core::{Button, GameBoy, CLOCK_HZ, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
+use script::Action;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -13,7 +14,8 @@ use std::time::{Duration, Instant};
 const USAGE: &str =
     "usage: gbemu <rom.gb> [--scale N] [--palette gray|dmg-green|pocket] [--model dmg|cgb|auto] [--mute]\n\
     \x20             [--screenshot-at-frame N --screenshot out.png] [--exit-after-frames N]\n\
-    \x20             [--input-script FILE]";
+    \x20             [--input-script FILE]\n\
+    keys: F1..F4 save state slot 1..4, Shift+F1..F4 load it (<rom>.ss1..ss4)";
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -173,6 +175,36 @@ fn power_on(
     ))
 }
 
+const SLOT_KEYS: [Key; 4] = [Key::F1, Key::F2, Key::F3, Key::F4];
+
+fn state_path(rom: &Path, slot: u8) -> PathBuf {
+    rom.with_extension(format!("ss{slot}"))
+}
+
+fn save_slot(gb: &GameBoy, rom: &Path, slot: u8) {
+    let path = state_path(rom, slot);
+    match std::fs::write(&path, gb.save_state()) {
+        Ok(()) => eprintln!("gbemu: saved state slot {slot} to {}", path.display()),
+        Err(e) => eprintln!("gbemu: cannot write {}: {e}", path.display()),
+    }
+}
+
+/// Returns true when a state was loaded.
+fn load_slot(gb: &mut GameBoy, rom: &Path, slot: u8) -> bool {
+    let path = state_path(rom, slot);
+    match std::fs::read(&path) {
+        Err(e) => eprintln!("gbemu: cannot read {}: {e}", path.display()),
+        Ok(data) => match gb.load_state(&data) {
+            Ok(()) => {
+                eprintln!("gbemu: loaded state slot {slot}");
+                return true;
+            }
+            Err(e) => eprintln!("gbemu: {}: {e}", path.display()),
+        },
+    }
+    false
+}
+
 const KEYMAP: [(Key, Button); 9] = [
     (Key::Right, Button::Right),
     (Key::Left, Button::Left),
@@ -184,6 +216,14 @@ const KEYMAP: [(Key, Button); 9] = [
     (Key::Backspace, Button::Select),
     (Key::RightShift, Button::Select),
 ];
+
+/// After a state load the joypad holds the saved button state; make it follow the keys actually down now.
+fn resync_keys(window: &Window, gb: &mut GameBoy, held: &mut [bool; KEYMAP.len()]) {
+    for (i, (key, button)) in KEYMAP.iter().enumerate() {
+        held[i] = window.is_key_down(*key);
+        gb.set_button(*button, held[i]);
+    }
+}
 
 fn run(args: Args) -> Result<(), String> {
     let rom = std::fs::read(&args.rom).map_err(|e| format!("{}: {e}", args.rom.display()))?;
@@ -228,6 +268,8 @@ fn run(args: Args) -> Result<(), String> {
     let frame_dur = Duration::from_secs_f64(CYCLES_PER_FRAME as f64 / CLOCK_HZ as f64);
     let mut deadline = Instant::now();
     let mut last_save = Instant::now();
+    let audio_debug = std::env::var_os("GBEMU_AUDIO_DEBUG").is_some();
+    let (mut dbg_at, mut dbg_frames) = (Instant::now(), 0u64);
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         if window.is_key_pressed(Key::P, KeyRepeat::No) {
@@ -245,6 +287,17 @@ fn run(args: Args) -> Result<(), String> {
             if down != held[i] {
                 held[i] = down;
                 gb.set_button(*button, down);
+            }
+        }
+        let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
+        for (i, key) in SLOT_KEYS.iter().enumerate() {
+            if window.is_key_pressed(*key, KeyRepeat::No) {
+                let slot = i as u8 + 1;
+                if !shift {
+                    save_slot(&gb, &args.rom, slot);
+                } else if load_slot(&mut gb, &args.rom, slot) {
+                    resync_keys(&window, &mut gb, &mut held);
+                }
             }
         }
         if window.is_key_pressed(Key::F12, KeyRepeat::No) {
@@ -268,7 +321,13 @@ fn run(args: Args) -> Result<(), String> {
 
         while next_event < events.len() && events[next_event].frame <= frames {
             let e = events[next_event];
-            gb.set_button(e.button, e.pressed);
+            match e.action {
+                Action::Button { button, pressed } => gb.set_button(button, pressed),
+                Action::Save(slot) => save_slot(&gb, &args.rom, slot),
+                Action::Load(slot) => {
+                    load_slot(&mut gb, &args.rom, slot);
+                }
+            }
             next_event += 1;
         }
 
@@ -294,6 +353,22 @@ fn run(args: Args) -> Result<(), String> {
             }
         }
 
+        if audio_debug && dbg_at.elapsed() >= Duration::from_secs(1) {
+            let secs = dbg_at.elapsed().as_secs_f64();
+            let (fill, played, under) = audio.as_ref().map_or((0, 0, 0), |a| {
+                (
+                    a.fill_frames(),
+                    a.stats.played.load(std::sync::atomic::Ordering::Relaxed),
+                    a.stats.underrun.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            });
+            eprintln!(
+                "audio: {:.2} fps, ring fill {fill} frames, device consumed {played}, underrun {under}",
+                (frames - dbg_frames) as f64 / secs
+            );
+            dbg_at = Instant::now();
+            dbg_frames = frames;
+        }
         if args.screenshot_at == Some(frames) {
             let path = args.screenshot.as_ref().unwrap();
             save_screenshot(path, &shades)?;
