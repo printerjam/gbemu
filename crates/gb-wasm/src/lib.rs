@@ -29,7 +29,8 @@ fn button_from_code(code: u8) -> Option<Button> {
 }
 
 fn fnv1a(data: &[u8]) -> u32 {
-    data.iter().fold(0x811C_9DC5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x0100_0193))
+    data.iter()
+        .fold(0x811C_9DC5u32, |h, &b| (h ^ b as u32).wrapping_mul(0x0100_0193))
 }
 
 #[wasm_bindgen]
@@ -154,7 +155,7 @@ impl Emulator {
 impl Emulator {
     fn convert_frame(&mut self) {
         let table = PALETTES[self.palette];
-        for (px, out) in self.gb.framebuffer().iter().zip(self.rgba.chunks_exact_mut(4)) {
+        for (px, out) in self.gb.framebuffer().iter().zip(self.rgba.as_chunks_mut::<4>().0) {
             let rgb = match px & 0xFF_FFFF {
                 0xFFFFFF => table[0],
                 0xAAAAAA => table[1],
@@ -162,7 +163,7 @@ impl Emulator {
                 0x000000 => table[3],
                 other => other,
             };
-            out.copy_from_slice(&[(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 0xFF]);
+            *out = [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 0xFF];
         }
     }
 }
@@ -183,7 +184,7 @@ mod tests {
         let mut e = Emulator::new(&rom()).ok().unwrap();
         e.run_frame();
         assert_eq!(e.frame_len(), 160 * 144 * 4);
-        assert!(e.rgba.chunks_exact(4).all(|p| p[3] == 0xFF));
+        assert!(e.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0xFF));
         e.set_palette(1);
         assert_eq!(&e.rgba[..3], &[0x9B, 0xBC, 0x0F]);
         e.set_palette(99);
