@@ -55,7 +55,7 @@ Screenshot credits (no ROMs are included in this repository):
 | mbc3 | 4 | 4 |
 | **Score** | **152** | **152** |
 
-Beyond the scored suites, `scripts/scoreboard.sh` tracks 6161 ROMs from the wider collection (gambatte, gbmicrotest, mealybug, age, same-suite, wilbertpol...), currently 3513 passing.
+Beyond the scored suites, `scripts/scoreboard.sh` tracks 6161 ROMs from the wider collection (gambatte, gbmicrotest, mealybug, age, same-suite, wilbertpol...), currently 4115 passing.
 Live numbers and milestone evidence are in [`PROGRESS.md`](PROGRESS.md); architecture and contracts in
 [`PLAN.md`](PLAN.md).
 

@@ -29,10 +29,11 @@ All milestone checks in this table were run against `main`.
 
 **SCORE: 152/152**
 
-Unscored (all tracked by the baseline, 4085/6161 total): gambatte DMG 1346/1873, gambatte CGB 2066/3352,
-gbmicrotest 347/482, mooneye-wilbertpol 78/96, same-suite-cgb 46/77, blargg-extra 21/22 (oam_bug 7 single overflows its
-own text buffer), cgb-extra 6/7 (cgb-acid-hell 2 px), mealybug 4/24 (+0/7 CGB), age 3/14 (+3/33 CGB), mooneye-cgb 3/9,
-scribbltests 5/5, turtle 2/2, little-things 1/2, bully 0/1, strikethrough 0/1.
+Unscored (all tracked by the baseline, 4115/6161 total): gambatte DMG 1346/1873, gambatte CGB 2074/3352,
+gbmicrotest 347/482, mooneye-wilbertpol 78/96, same-suite-cgb 68/77, blargg-extra 21/22 (oam_bug 7 single
+overflows its own text buffer), cgb-extra 6/7 (cgb-acid-hell 2 px), mealybug 4/24 (+0/7 CGB), age 3/14
+(+3/33 CGB), mooneye-cgb 3/9, scribbltests 5/5, turtle 2/2, little-things 1/2,
+bully 0/1, strikethrough 0/1.
 
 ## Tools
 
@@ -67,9 +68,13 @@ scribbltests 5/5, turtle 2/2, little-things 1/2, bully 0/1, strikethrough 0/1.
 
 - 2026-10-03: Core merge (mooneye 66/66, oam_bug, DIV-clocked serial) → 152/152; wide suites added; Pages verified live.
 - 2026-10-03: accuracy wave 1: timer rework (TAC fit removed), OAM DMA bus conflicts, CGB speed switch (2^17 clocks) + HDMA, CGB APU (PCM12/34, SameSuite), pixel FIFO PPU, cheats, bench, PWA, docs. 3513 → 4085/6161; Tobu bench 15x real time.
+- 2026-10-03: accuracy wave 2: PPU bulk-advance perf, HDMA HBlank request timing, HALT/HDMA model, SameSuite APU (noise counter, sweep stages, CGB envelope) → 4115/6161. STATE_VERSION 8.
 
 ## Next
 
-- Accuracy wave: pixel FIFO (mealybug, cgb-acid-hell, age m3, gambatte scx_during_m3), gambatte DMG screenshot groups
-  (~0 pass: suspect shared cause), timer/oamdma/stat-irq gambatte groups, CGB speed switch (age spsw, gambatte speedchange),
-  same-suite APU.
+Open accuracy items (each needs a model, not a constant fit):
+- PPU: mid-line window disable/re-enable (gambatte late_reenable, mealybug wx/win_en), SCY/SCX mid-line fetch timing,
+  sprite-at-X<3 fetch timing, CGB palette RAM writes mid-line (cgb-acid-hell), SCX-dependent HBlank/HDMA offsets,
+  dot-granular STAT IRQ for double-speed IF-ack pairs.
+- CGB-C vs CGB-E revision splits (APU square start delay in double speed; age spsw-tima vs gambatte): we model CGB-E.
+- gbmicrotest PPU-side int_/poweron_/hblank_ groups; wilbertpol timer_if.
