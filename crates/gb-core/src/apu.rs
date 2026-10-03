@@ -94,6 +94,10 @@ impl Square {
 
 #[derive(Serialize, Deserialize)]
 pub struct Apu {
+    /// CGB (non-AGB) behaviour: free wave RAM access while playing, no retrigger corruption,
+    /// length counters cleared by power-off and locked while off.
+    #[serde(default)]
+    cgb: bool,
     #[serde(with = "crate::state::bytes")]
     regs: [u8; 0x30],
     #[serde(with = "crate::state::bytes")]
@@ -142,6 +146,7 @@ impl Apu {
             regs: [0; 0x30],
             wave_ram: [0; 16],
             sample_rate: 48_000,
+            cgb: false,
             power: true,
             fs: 0,
             ch1: Square::new(),
@@ -471,6 +476,9 @@ impl Apu {
         if !self.ch3_enabled {
             return Some(usize::MAX);
         }
+        if self.cgb {
+            return Some((self.ch3_pos >> 1) as usize);
+        }
         if self.cycles - self.ch3_last_read < 2 {
             Some((self.ch3_pos >> 1) as usize)
         } else {
@@ -515,7 +523,10 @@ impl Apu {
         }
         let i = (addr - 0xFF10) as usize;
         if !self.power {
-            // DMG: length counters stay writable while powered off.
+            // DMG: length counters stay writable while powered off (not on CGB).
+            if self.cgb {
+                return;
+            }
             match i {
                 0x01 => self.ch1.len = 64 - (val & 63) as u16,
                 0x06 => self.ch2.len = 64 - (val & 63) as u16,
@@ -618,6 +629,12 @@ impl Apu {
             for r in &mut self.regs[0..0x17] {
                 *r = 0;
             }
+            if self.cgb {
+                self.ch1.len = 0;
+                self.ch2.len = 0;
+                self.ch3_len = 0;
+                self.ch4_len = 0;
+            }
             self.ch1.enabled = false;
             self.ch2.enabled = false;
             self.ch3_enabled = false;
@@ -689,7 +706,7 @@ impl Apu {
         }
         // DMG quirk: retriggering right as the channel reads wave RAM
         // corrupts the first bytes.
-        if self.ch3_enabled && self.ch3_timer != NEVER && self.ch3_timer <= 2 {
+        if !self.cgb && self.ch3_enabled && self.ch3_timer != NEVER && self.ch3_timer <= 2 {
             let p = (self.ch3_pos.wrapping_add(1) & 31) >> 1;
             if p < 4 {
                 self.wave_ram[0] = self.wave_ram[p as usize];
@@ -722,6 +739,11 @@ impl Apu {
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Select CGB (true) or DMG (false) APU behaviour.
+    pub fn set_cgb(&mut self, cgb: bool) {
+        self.cgb = cgb;
     }
 
     pub fn set_sample_rate(&mut self, hz: u32) {

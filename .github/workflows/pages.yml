@@ -1,0 +1,73 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      # The wasm-bindgen CLI must match the wasm-bindgen crate version pinned in Cargo.lock exactly.
+      - name: Read pinned wasm-bindgen version
+        id: wbg
+        run: |
+          version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache wasm-bindgen CLI
+        id: wbg-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wasm-bindgen-cli
+          key: wasm-bindgen-cli-${{ steps.wbg.outputs.version }}-${{ runner.os }}
+
+      - name: Install wasm-bindgen CLI
+        if: steps.wbg-cache.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version "${{ steps.wbg.outputs.version }}" --locked --root ~/.cache/wasm-bindgen-cli
+
+      - name: Add wasm-bindgen CLI to PATH
+        run: echo "$HOME/.cache/wasm-bindgen-cli/bin" >> "$GITHUB_PATH"
+
+      - name: Build web bundle
+        run: scripts/build-web.sh
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
