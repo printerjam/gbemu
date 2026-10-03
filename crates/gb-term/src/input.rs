@@ -13,6 +13,7 @@ pub enum Action {
     Pause,
     SaveState,
     LoadState,
+    Rewind,
 }
 
 pub fn map_key(k: &KeyEvent) -> Option<Action> {
@@ -37,6 +38,7 @@ pub fn map_key(k: &KeyEvent) -> Option<Action> {
             'z' | 'j' => Action::Button(B),
             'q' => Action::Quit,
             'p' => Action::Pause,
+            'r' => Action::Rewind,
             '[' => Action::SaveState,
             ']' => Action::LoadState,
             _ => return None,
@@ -72,6 +74,7 @@ pub struct Input {
     releases: bool,
     held: [Held; 8],
     applied: [bool; 8],
+    rewind: Held,
 }
 
 impl Input {
@@ -80,6 +83,7 @@ impl Input {
             releases,
             held: [Held::No; 8],
             applied: [false; 8],
+            rewind: Held::No,
         }
     }
 
@@ -91,6 +95,23 @@ impl Input {
             _ if self.releases => Held::UntilRelease,
             _ => Held::Until(frame + HOLD_FRAMES),
         };
+    }
+
+    /// Record a rewind key event at `frame` (held semantics as for buttons).
+    pub fn rewind_key(&mut self, kind: KeyEventKind, frame: u64) {
+        self.rewind = match kind {
+            KeyEventKind::Release => Held::No,
+            _ if self.releases => Held::UntilRelease,
+            _ => Held::Until(frame + HOLD_FRAMES),
+        };
+    }
+
+    pub fn rewinding(&self, frame: u64) -> bool {
+        match self.rewind {
+            Held::No => false,
+            Held::UntilRelease => true,
+            Held::Until(f) => frame < f,
+        }
     }
 
     /// Every button's desired state at `frame`, for re-applying after the machine state was replaced.
@@ -153,6 +174,7 @@ mod tests {
         assert_eq!(map_key(&ev(KeyCode::Esc, n)), Some(Action::Quit));
         assert_eq!(map_key(&ev(KeyCode::F(1), n)), Some(Action::SaveState));
         assert_eq!(map_key(&ev(KeyCode::Char(']'), n)), Some(Action::LoadState));
+        assert_eq!(map_key(&ev(KeyCode::Char('R'), n)), Some(Action::Rewind));
     }
 
     #[test]

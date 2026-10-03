@@ -1,5 +1,5 @@
-//! `--input-script` parser: lines of `frame button down|up`, `frame save N` or `frame load N`
-//! (state slots 1..=4), `#` comments.
+//! `--input-script` parser: lines of `frame button down|up`, `frame save N` / `frame load N`
+//! (state slots 1..=4), `frame rewind N` (step back N rewind snapshots), `#` comments.
 
 use gb_core::Button;
 
@@ -8,6 +8,7 @@ pub enum Action {
     Button { button: Button, pressed: bool },
     Save(u8),
     Load(u8),
+    Rewind(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +42,9 @@ pub fn parse(text: &str) -> Result<Vec<Event>, String> {
         let err = |msg: &str| format!("input script line {}: {msg}", n + 1);
         let parts: Vec<&str> = line.split_whitespace().collect();
         let [frame, button, action] = parts[..] else {
-            return Err(err("expected `frame button down|up` or `frame save|load N`"));
+            return Err(err(
+                "expected `frame button down|up`, `frame save|load N` or `frame rewind N`",
+            ));
         };
         let frame = frame.parse().map_err(|_| err("bad frame number"))?;
         let action = match button {
@@ -56,6 +59,13 @@ pub fn parse(text: &str) -> Result<Vec<Event>, String> {
                     Action::Load(slot)
                 }
             }
+            "rewind" => Action::Rewind(
+                action
+                    .parse()
+                    .ok()
+                    .filter(|&n| n >= 1)
+                    .ok_or_else(|| err("bad rewind count"))?,
+            ),
             _ => Action::Button {
                 button: parse_button(button).ok_or_else(|| err("unknown button"))?,
                 pressed: match action {
@@ -100,6 +110,8 @@ mod tests {
         assert!(parse("1 save 0").is_err());
         assert!(parse("1 load 5").is_err());
         assert!(parse("1 save x").is_err());
+        assert_eq!(parse("3 rewind 12").unwrap()[0].action, Action::Rewind(12));
+        assert!(parse("3 rewind 0").is_err());
     }
 
     #[test]

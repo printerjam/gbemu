@@ -4,7 +4,7 @@ mod audio;
 mod script;
 
 use audio::Audio;
-use gb_core::{Button, GameBoy, CLOCK_HZ, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
+use gb_core::{Button, GameBoy, Rewind, CLOCK_HZ, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 use script::Action;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 const USAGE: &str = "usage: gbemu <rom.gb> [--scale N] [--palette gray|dmg-green|pocket] [--mute]\n\
     \x20             [--screenshot-at-frame N --screenshot out.png] [--exit-after-frames N]\n\
     \x20             [--input-script FILE]\n\
-    keys: F1..F4 save state slot 1..4, Shift+F1..F4 load it (<rom>.ss1..ss4)";
+    keys: F1..F4 save state slot 1..4, Shift+F1..F4 load it (<rom>.ss1..ss4), hold Q to rewind";
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -256,6 +256,7 @@ fn run(args: Args) -> Result<(), String> {
     let mut held = [false; KEYMAP.len()];
     let mut frames: u64 = 0;
     let mut paused = false;
+    let mut rewind = Rewind::default();
     let frame_dur = Duration::from_secs_f64(CYCLES_PER_FRAME as f64 / CLOCK_HZ as f64);
     let mut deadline = Instant::now();
     let mut last_save = Instant::now();
@@ -269,6 +270,7 @@ fn run(args: Args) -> Result<(), String> {
         if window.is_key_pressed(Key::R, KeyRepeat::No) {
             saver.flush(&gb);
             (gb, saver) = power_on(&rom, &sav, sample_rate)?;
+            rewind.clear();
             held = [false; KEYMAP.len()];
             frames = 0;
             next_event = 0;
@@ -287,6 +289,7 @@ fn run(args: Args) -> Result<(), String> {
                 if !shift {
                     save_slot(&gb, &args.rom, slot);
                 } else if load_slot(&mut gb, &args.rom, slot) {
+                    rewind.clear();
                     resync_keys(&window, &mut gb, &mut held);
                 }
             }
@@ -310,19 +313,36 @@ fn run(args: Args) -> Result<(), String> {
             continue;
         }
 
+        let mut rewound = false;
         while next_event < events.len() && events[next_event].frame <= frames {
             let e = events[next_event];
             match e.action {
                 Action::Button { button, pressed } => gb.set_button(button, pressed),
                 Action::Save(slot) => save_slot(&gb, &args.rom, slot),
                 Action::Load(slot) => {
-                    load_slot(&mut gb, &args.rom, slot);
+                    if load_slot(&mut gb, &args.rom, slot) {
+                        rewind.clear();
+                    }
+                }
+                Action::Rewind(n) => {
+                    for _ in 0..n {
+                        if !rewind.pop_into(&mut gb) {
+                            break;
+                        }
+                    }
+                    rewound = true;
                 }
             }
             next_event += 1;
         }
 
-        gb.run_frame();
+        if window.is_key_down(Key::Q) {
+            // Hold to rewind: each emulated frame steps back one snapshot (a few frames of game time).
+            rewind.pop_into(&mut gb);
+        } else if !rewound {
+            rewind.frame(&gb);
+            gb.run_frame();
+        }
         frames += 1;
         recolor(gb.framebuffer(), &args.palette, &mut shades);
         window
