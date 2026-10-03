@@ -8,6 +8,9 @@ use crate::irq;
 use crate::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use serde::{Deserialize, Serialize};
 
+mod pipe;
+use pipe::Pipe;
+
 const DOTS_PER_LINE: u16 = 456;
 const LINES: u8 = 154;
 /// Dots at the start of a line during which the visible mode and LYC flag
@@ -16,8 +19,6 @@ const LINE_PREFIX: u16 = 4;
 const MODE3_START: u16 = 80;
 /// Dot the first line starts at after the LCD is switched on.
 const FIRST_LINE_DOT: u16 = 4;
-const MODE3_BASE_LEN: u16 = 172;
-const SPRITE_FIRST_DISCOUNT: u16 = 3;
 
 const LCDC: usize = 0;
 const STAT: usize = 1;
@@ -48,6 +49,8 @@ pub const DEFAULT_PALETTE: [u32; 4] = [0x00FF_FFFF, 0x00AA_AAAA, 0x0055_5555, 0x
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
 struct Sprite {
+    /// OAM index (0..40).
+    idx: u8,
     y: u8,
     x: u8,
     tile: u8,
@@ -82,8 +85,13 @@ pub struct Ppu {
     lyc_flag: bool,
     stat_line: bool,
     pending_irq: u8,
-    /// Dot at which mode 3 ends on the current line.
+    /// Dot at which mode 3 ended on the current line (`MODE3_RUNNING` while it is in progress).
     mode0_dot: u16,
+    pipe: Pipe,
+    /// Palette register whose OR-glitch value is replaced by the written value on the next dot.
+    pal_fix: Option<(u8, u8)>,
+    /// Mode sources seen by the last STAT line evaluation.
+    stat_key: u8,
     sprites: [Sprite; 10],
     sprite_count: usize,
     wy_triggered: bool,
@@ -158,6 +166,9 @@ impl Ppu {
             stat_line: false,
             pending_irq: 0,
             mode0_dot: 0,
+            pipe: Pipe::default(),
+            pal_fix: None,
+            stat_key: 0,
             sprites: [Sprite::default(); 10],
             sprite_count: 0,
             wy_triggered: false,
@@ -195,6 +206,29 @@ impl Ppu {
         ppu.update_stat_line();
         ppu.pending_irq = 0;
         ppu
+    }
+
+    /// VRAM as the DMG boot ROM leaves it: the cartridge's logo scaled into tiles 1-24, the (R)
+    /// symbol as tile 25 and the tile map that displays them.
+    pub fn load_boot_vram(&mut self, logo: &[u8; 48]) {
+        let double = |nibble: u8| (0..4).fold(0u8, |acc, b| acc | if nibble >> b & 1 != 0 { 3 << (b * 2) } else { 0 });
+        let mut tile_bytes = Vec::with_capacity(48 * 8);
+        for &byte in logo {
+            for nibble in [byte >> 4, byte & 15] {
+                let v = double(nibble);
+                tile_bytes.extend_from_slice(&[v, 0, v, 0]);
+            }
+        }
+        self.vram[0x10..0x10 + tile_bytes.len()].copy_from_slice(&tile_bytes);
+        const R_SYMBOL: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
+        for (i, &b) in R_SYMBOL.iter().enumerate() {
+            self.vram[0x19 * 16 + i * 2] = b;
+        }
+        self.vram[0x1910] = 0x19;
+        for i in 0..12u8 {
+            self.vram[0x1904 + i as usize] = i + 1;
+            self.vram[0x1924 + i as usize] = i + 13;
+        }
     }
 
     /// Replace the four output shades (index = DMG color 0..3). Default is
@@ -356,6 +390,11 @@ impl Ppu {
                 self.frame_ready = true;
             }
         } else if self.ly < 144 {
+            if self.pipe.active {
+                self.pipe_cycle();
+            } else if self.pipe_draining() {
+                self.pipe_drain();
+            }
             if self.dot == MODE3_START {
                 self.start_mode3();
                 self.vram_read_lock = !self.first_line;
@@ -367,7 +406,6 @@ impl Ppu {
                 self.oam_read_lock = true;
                 self.oam_write_lock = true;
             } else if self.dot == self.mode0_dot {
-                self.render_line();
                 self.irq_mode = 0;
             } else if self.dot == self.mode0_dot + LINE_PREFIX {
                 self.mode = 0;
@@ -378,7 +416,15 @@ impl Ppu {
         if self.dot == LINE_PREFIX + 4 {
             self.vblank_oam_irq = false;
         }
-        self.update_stat_line();
+        if let Some((i, v)) = self.pal_fix.take() {
+            self.regs[i as usize] = v;
+        }
+        // The STAT line only changes with the mode sources or around line starts (LY/LYC compare).
+        let key = self.irq_mode | (self.vblank_oam_irq as u8) << 2;
+        if self.dot <= 8 || key != self.stat_key {
+            self.stat_key = key;
+            self.update_stat_line();
+        }
     }
 
     fn sprite_height(&self) -> u8 {
@@ -389,11 +435,7 @@ impl Ppu {
         }
     }
 
-    fn window_starts_here(&self) -> bool {
-        self.regs[LCDC] & 0x21 == 0x21 && self.wy_triggered && self.regs[WX] <= 166
-    }
-
-    /// OAM scan result, mode 3 length.
+    /// OAM scan, then hand over to the pixel pipeline.
     fn start_mode3(&mut self) {
         self.irq_mode = 3;
         if self.regs[LCDC] & 0x20 != 0 && self.ly == self.regs[WY] {
@@ -407,6 +449,7 @@ impl Ppu {
             let row = self.ly as i16 + 16 - self.oam[o] as i16;
             if (0..h).contains(&row) {
                 self.sprites[n] = Sprite {
+                    idx: i as u8,
                     y: self.oam[o],
                     x: self.oam[o + 1],
                     tile: self.oam[o + 2],
@@ -419,175 +462,26 @@ impl Ppu {
             }
         }
         self.sprite_count = n;
-        // Fetch order is by X (then OAM order); the draw priority follows it
-        // unless CGB sprites are prioritised by OAM order alone.
-        if !self.cgb_mode() || self.opri & 1 != 0 {
-            self.sprites[..n].sort_by_key(|s| s.x);
-        }
-        let mut by_x = self.sprites;
-        by_x[..n].sort_by_key(|s| s.x);
-
-        let scx = self.regs[SCX] as u16;
-        let mut len = MODE3_BASE_LEN + (scx & 7);
-        if self.window_starts_here() {
-            len += 6;
-        }
-        if self.regs[LCDC] & 0x02 != 0 {
-            let mut last_tile = u16::MAX;
-            for s in &by_x[..n] {
-                if s.x >= 168 {
-                    continue;
-                }
-                if last_tile == u16::MAX {
-                    // Measured (mooneye intr_2_mode0_timing_sprites): the
-                    // first fetch overlaps 3 dots of the base length.
-                    len -= SPRITE_FIRST_DISCOUNT;
-                }
-                let pos = s.x as u16 + scx;
-                let tile = pos / 8;
-                if tile != last_tile {
-                    last_tile = tile;
-                    len += 5 - (pos % 8).min(5);
-                }
-                len += 6;
-            }
-        }
-        self.mode0_dot = MODE3_START + len;
+        // Sprites match the pixel counter in X order (then OAM order).
+        self.sprites[..n].sort_by_key(|s| s.x);
+        self.pipe_start();
     }
 
+    /// VRAM offset of a tile row's low byte (LCDC.4 addressing for BG/window, always 0x8000 for sprites).
     #[inline]
-    fn tile_row(&self, tile: u8, row: u8, sprite: bool, bank: u8) -> (u8, u8) {
+    fn tile_addr(&self, tile: u8, row: u8, sprite: bool, bank: u8) -> usize {
         let base = if sprite || self.regs[LCDC] & 0x10 != 0 {
             tile as usize * 16
         } else {
             (0x1000 + (tile as i8 as i32) * 16) as usize
         };
-        let a = bank as usize * 0x2000 + base + row as usize * 2;
+        bank as usize * 0x2000 + base + row as usize * 2
+    }
+
+    #[inline]
+    fn tile_row(&self, tile: u8, row: u8, sprite: bool, bank: u8) -> (u8, u8) {
+        let a = self.tile_addr(tile, row, sprite, bank);
         (self.vram[a], self.vram[a + 1])
-    }
-
-    /// One BG/window tile row: `(lo, hi, attributes)`. `map` is the VRAM offset of the tile map
-    /// row, `row` the pixel row within the tile (before CGB y-flip).
-    fn bg_tile(&self, map: usize, col: usize, row: u8, cgb: bool) -> (u8, u8, u8) {
-        let tile = self.vram[map + col];
-        let at = if cgb { self.vram[0x2000 + map + col] } else { 0 };
-        let row = if at & 0x40 != 0 { 7 - row } else { row };
-        let (lo, hi) = self.tile_row(tile, row, false, (at >> 3) & 1);
-        (lo, hi, at)
-    }
-
-    fn render_line(&mut self) {
-        let ly = self.ly;
-        let lcdc = self.regs[LCDC];
-        let cgb = self.cgb_mode();
-        let mut bg = [0u8; SCREEN_WIDTH]; // color ids
-        let mut attr = [0u8; SCREEN_WIDTH]; // CGB BG attributes
-        if lcdc & 0x01 != 0 || cgb {
-            let scx = self.regs[SCX] as usize;
-            let y = ly.wrapping_add(self.regs[SCY]) as usize;
-            let map = if lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 } + (y / 8) * 32;
-            let mut cache = (usize::MAX, 0u8, 0u8, 0u8);
-            for (x, (out, at_out)) in bg.iter_mut().zip(attr.iter_mut()).enumerate() {
-                let px = (scx + x) & 0xFF;
-                let col = px / 8;
-                if cache.0 != col {
-                    let (lo, hi, at) = self.bg_tile(map, col, (y & 7) as u8, cgb);
-                    cache = (col, lo, hi, at);
-                }
-                let bit = if cache.3 & 0x20 != 0 { px & 7 } else { 7 - (px & 7) };
-                *out = ((cache.1 >> bit) & 1) | (((cache.2 >> bit) & 1) << 1);
-                *at_out = cache.3;
-            }
-            if self.window_starts_here() {
-                let wx = self.regs[WX] as i32 - 7;
-                let map = if lcdc & 0x40 != 0 { 0x1C00 } else { 0x1800 } + (self.window_line as usize / 8) * 32;
-                let row = self.window_line & 7;
-                let mut cache = (usize::MAX, 0u8, 0u8, 0u8);
-                let first = wx.max(0) as usize;
-                for (x, (out, at_out)) in bg.iter_mut().zip(attr.iter_mut()).enumerate().skip(first) {
-                    let px = (x as i32 - wx) as usize;
-                    let col = px / 8;
-                    if cache.0 != col {
-                        let (lo, hi, at) = self.bg_tile(map, col, row, cgb);
-                        cache = (col, lo, hi, at);
-                    }
-                    let bit = if cache.3 & 0x20 != 0 { px & 7 } else { 7 - (px & 7) };
-                    *out = ((cache.1 >> bit) & 1) | (((cache.2 >> bit) & 1) << 1);
-                    *at_out = cache.3;
-                }
-                self.window_line += 1;
-            }
-        }
-
-        let bgp = self.regs[BGP];
-        let row_out = ly as usize * SCREEN_WIDTH;
-        for (x, out) in self.framebuffer[row_out..row_out + SCREEN_WIDTH].iter_mut().enumerate() {
-            let id = bg[x];
-            *out = if cgb {
-                self.bg_rgb[(attr[x] & 7) as usize * 4 + id as usize]
-            } else {
-                let shade = ((bgp >> (id * 2)) & 3) as usize;
-                if self.compat {
-                    self.bg_rgb[shade]
-                } else {
-                    self.palette[shade]
-                }
-            };
-        }
-
-        if lcdc & 0x02 != 0 {
-            let h = self.sprite_height();
-            // Draw lowest priority first so higher priority overwrites.
-            let mut color = [0u8; SCREEN_WIDTH]; // 0 = no sprite pixel
-            let mut flags = [0u8; SCREEN_WIDTH];
-            for s in self.sprites[..self.sprite_count].iter().rev() {
-                let mut row = (ly as i16 + 16 - s.y as i16) as u8;
-                if s.flags & 0x40 != 0 {
-                    row = h - 1 - row;
-                }
-                let tile = if h == 16 { s.tile & 0xFE } else { s.tile };
-                let bank = if cgb { (s.flags >> 3) & 1 } else { 0 };
-                let (lo, hi) = self.tile_row(tile, row, true, bank);
-                for i in 0..8u8 {
-                    let sx = s.x as i16 - 8 + i as i16;
-                    if !(0..SCREEN_WIDTH as i16).contains(&sx) {
-                        continue;
-                    }
-                    let bit = if s.flags & 0x20 != 0 { i } else { 7 - i };
-                    let c = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
-                    if c != 0 {
-                        color[sx as usize] = c;
-                        flags[sx as usize] = s.flags;
-                    }
-                }
-            }
-            for x in 0..SCREEN_WIDTH {
-                let c = color[x];
-                let f = flags[x];
-                if c == 0 {
-                    continue;
-                }
-                let bg_wins = if cgb {
-                    lcdc & 0x01 != 0 && (f & 0x80 != 0 || attr[x] & 0x80 != 0)
-                } else {
-                    f & 0x80 != 0
-                };
-                if bg_wins && bg[x] != 0 {
-                    continue;
-                }
-                self.framebuffer[row_out + x] = if cgb {
-                    self.obj_rgb[(f & 7) as usize * 4 + c as usize]
-                } else {
-                    let obp = (f >> 4) & 1;
-                    let shade = ((self.regs[OBP0 + obp as usize] >> (c * 2)) & 3) as usize;
-                    if self.compat {
-                        self.obj_rgb[obp as usize * 4 + shade]
-                    } else {
-                        self.palette[shade]
-                    }
-                };
-            }
-        }
     }
 
     fn unlock_all(&mut self) {
@@ -699,6 +593,7 @@ impl Ppu {
                     self.stat_line = self.lyc_flag && self.regs[STAT] & 0x40 != 0;
                     self.unlock_all();
                     self.first_line = false;
+                    self.pipe = Pipe::default();
                     self.off_dots = 0;
                     self.wy_triggered = false;
                     self.window_line = 0;
@@ -732,6 +627,11 @@ impl Ppu {
             LYC => {
                 self.regs[LYC] = val;
                 self.update_stat_line();
+            }
+            BGP | OBP0 | OBP1 if !self.cgb && self.lcd_on() => {
+                // DMG: for one dot after a palette write the register reads as old | new.
+                self.pal_fix = Some((i as u8, val));
+                self.regs[i] |= val;
             }
             _ => self.regs[i] = val,
         }
@@ -849,16 +749,63 @@ mod tests {
         assert_eq!(p.read_vram(0x8000), 7);
     }
 
+    /// Closed-form mode 3 length (no window): 172 + SCX%8, each sprite costs 6, the first sprite
+    /// of a BG tile also waits for the fetcher (5 - offset), the first sprite of the line is 3 cheaper.
+    fn expected_mode3_len(scx: u8, xs: &[u8]) -> u16 {
+        let mut xs: Vec<u8> = xs.to_vec();
+        xs.sort();
+        let mut len = 172 + (scx & 7) as u16;
+        let mut last_tile = None;
+        let mut first = true;
+        for x in xs.into_iter().filter(|&x| x < 168) {
+            if first {
+                len -= 3;
+                first = false;
+            }
+            let pos = x as u16 + scx as u16;
+            if last_tile != Some(pos / 8) {
+                last_tile = Some(pos / 8);
+                len += 5 - (pos % 8).min(5);
+            }
+            len += 6;
+        }
+        len
+    }
+
     #[test]
-    fn mode3_length_scx_and_sprites() {
-        let mut p = lcd_on_ppu();
-        p.write_reg(0xFF43, 5);
-        p.write_reg(0xFF40, 0x93);
-        p.write_oam_dma(0, 16 + 20);
-        p.write_oam_dma(1, 8 + 3); // x=3 -> offset (3+8... pos=11+5=16) tile aligned
-        run_to(&mut p, 20, 100);
-        // pos = 11 + 5 = 16 -> offset 0 -> 5 + 6
-        assert_eq!(p.mode0_dot, 80 + 172 + 5 + 11 - 3);
+    fn mode3_length_emerges_from_fetcher() {
+        let mut seed = 12345u32;
+        let mut rnd = move |n: u32| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) % n
+        };
+        for case in 0..60 {
+            let mut p = lcd_on_ppu();
+            let scx = rnd(8) as u8;
+            let count = rnd(11) as usize;
+            let xs: Vec<u8> = (0..count)
+                .map(|_| {
+                    if case % 3 == 0 {
+                        8 + rnd(24) as u8
+                    } else {
+                        rnd(176) as u8
+                    }
+                })
+                .collect();
+            p.write_reg(0xFF43, scx);
+            p.write_reg(0xFF40, 0x93);
+            p.oam.fill(0);
+            for (i, &x) in xs.iter().enumerate() {
+                p.write_oam_dma(i as u8 * 4, 16 + 20);
+                p.write_oam_dma(i as u8 * 4 + 1, x);
+            }
+            run_to(&mut p, 21, 400);
+            assert_eq!(
+                p.mode0_dot - MODE3_START,
+                expected_mode3_len(scx, &xs),
+                "scx {scx} sprites at {xs:?}"
+            );
+        }
     }
 
     #[test]

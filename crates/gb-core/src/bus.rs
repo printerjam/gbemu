@@ -86,7 +86,13 @@ pub struct Bus {
 
 impl Bus {
     pub fn new(cart: Cartridge) -> Self {
-        Self::with_ppu(cart, Ppu::new(), false)
+        let mut ppu = Ppu::new();
+        let mut logo = [0u8; 48];
+        for (i, b) in logo.iter_mut().enumerate() {
+            *b = cart.read_rom(0x104 + i as u16);
+        }
+        ppu.load_boot_vram(&logo);
+        Self::with_ppu(cart, ppu, false)
     }
 
     /// CGB hardware; the cartridge decides between CGB mode and DMG compatibility mode.
