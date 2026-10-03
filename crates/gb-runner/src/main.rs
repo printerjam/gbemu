@@ -20,7 +20,7 @@ usage:
   gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--wav out.wav] [--until-ldbb]
   gbtest trace <rom> [--steps N] [--doctor]
 
-suites: blargg, mooneye, mooneye-mbc, acid2 (scored); blargg-extra (not scored)
+suites: blargg, mooneye, mooneye-mbc, acid2, mbc3 (scored); blargg-extra (not scored)
 default suites: the scored ones. Exit code is 0 for any scoreboard run.
 
 trace: one line per executed instruction (default 1000000). --doctor emits Gameboy Doctor

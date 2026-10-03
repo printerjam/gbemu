@@ -6,13 +6,15 @@ mod script;
 use audio::Audio;
 use gb_core::{Button, GameBoy, CLOCK_HZ, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
+use script::Action;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage: gbemu <rom.gb> [--scale N] [--palette gray|dmg-green|pocket] [--mute]\n\
     \x20             [--screenshot-at-frame N --screenshot out.png] [--exit-after-frames N]\n\
-    \x20             [--input-script FILE]";
+    \x20             [--input-script FILE]\n\
+    keys: F1..F4 save state slot 1..4, Shift+F1..F4 load it (<rom>.ss1..ss4)";
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -164,6 +166,36 @@ fn power_on(rom: &[u8], sav: &Path, sample_rate: u32) -> Result<(GameBoy, Saver)
     ))
 }
 
+const SLOT_KEYS: [Key; 4] = [Key::F1, Key::F2, Key::F3, Key::F4];
+
+fn state_path(rom: &Path, slot: u8) -> PathBuf {
+    rom.with_extension(format!("ss{slot}"))
+}
+
+fn save_slot(gb: &GameBoy, rom: &Path, slot: u8) {
+    let path = state_path(rom, slot);
+    match std::fs::write(&path, gb.save_state()) {
+        Ok(()) => eprintln!("gbemu: saved state slot {slot} to {}", path.display()),
+        Err(e) => eprintln!("gbemu: cannot write {}: {e}", path.display()),
+    }
+}
+
+/// Returns true when a state was loaded.
+fn load_slot(gb: &mut GameBoy, rom: &Path, slot: u8) -> bool {
+    let path = state_path(rom, slot);
+    match std::fs::read(&path) {
+        Err(e) => eprintln!("gbemu: cannot read {}: {e}", path.display()),
+        Ok(data) => match gb.load_state(&data) {
+            Ok(()) => {
+                eprintln!("gbemu: loaded state slot {slot}");
+                return true;
+            }
+            Err(e) => eprintln!("gbemu: {}: {e}", path.display()),
+        },
+    }
+    false
+}
+
 const KEYMAP: [(Key, Button); 9] = [
     (Key::Right, Button::Right),
     (Key::Left, Button::Left),
@@ -175,6 +207,14 @@ const KEYMAP: [(Key, Button); 9] = [
     (Key::Backspace, Button::Select),
     (Key::RightShift, Button::Select),
 ];
+
+/// After a state load the joypad holds the saved button state; make it follow the keys actually down now.
+fn resync_keys(window: &Window, gb: &mut GameBoy, held: &mut [bool; KEYMAP.len()]) {
+    for (i, (key, button)) in KEYMAP.iter().enumerate() {
+        held[i] = window.is_key_down(*key);
+        gb.set_button(*button, held[i]);
+    }
+}
 
 fn run(args: Args) -> Result<(), String> {
     let rom = std::fs::read(&args.rom).map_err(|e| format!("{}: {e}", args.rom.display()))?;
@@ -240,6 +280,17 @@ fn run(args: Args) -> Result<(), String> {
                 gb.set_button(*button, down);
             }
         }
+        let shift = window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift);
+        for (i, key) in SLOT_KEYS.iter().enumerate() {
+            if window.is_key_pressed(*key, KeyRepeat::No) {
+                let slot = i as u8 + 1;
+                if !shift {
+                    save_slot(&gb, &args.rom, slot);
+                } else if load_slot(&mut gb, &args.rom, slot) {
+                    resync_keys(&window, &mut gb, &mut held);
+                }
+            }
+        }
         if window.is_key_pressed(Key::F12, KeyRepeat::No) {
             let mut path = args.rom.clone();
             let n = (0..)
@@ -261,7 +312,13 @@ fn run(args: Args) -> Result<(), String> {
 
         while next_event < events.len() && events[next_event].frame <= frames {
             let e = events[next_event];
-            gb.set_button(e.button, e.pressed);
+            match e.action {
+                Action::Button { button, pressed } => gb.set_button(button, pressed),
+                Action::Save(slot) => save_slot(&gb, &args.rom, slot),
+                Action::Load(slot) => {
+                    load_slot(&mut gb, &args.rom, slot);
+                }
+            }
             next_event += 1;
         }
 

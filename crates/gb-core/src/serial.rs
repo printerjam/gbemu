@@ -2,10 +2,12 @@
 //! Transmitted bytes are recorded so test ROMs (blargg) can report over serial.
 
 use crate::irq;
+use serde::{Deserialize, Serialize};
 
 /// Internal clock: 8192 Hz bit rate = 128 M-cycles per bit.
 const M_CYCLES_PER_BIT: u16 = 128;
 
+#[derive(Serialize, Deserialize)]
 pub struct Serial {
     sb: u8,
     sc: u8,
