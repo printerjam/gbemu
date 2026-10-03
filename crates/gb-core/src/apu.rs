@@ -67,6 +67,8 @@ struct Square {
     enabled: bool,
     timer: u32,
     pos: u8,
+    /// Duty output bit latched when the position last advanced (duty changes apply from the next step).
+    out: u8,
     len: u16,
     env: Envelope,
     // sweep (channel 1 only)
@@ -82,6 +84,7 @@ impl Square {
             enabled: false,
             timer: NEVER,
             pos: 0,
+            out: 0,
             len: 0,
             env: Envelope::default(),
             shadow: 0,
@@ -219,6 +222,7 @@ impl Apu {
                 if self.ch1.timer == 0 {
                     self.ch1.timer = self.square_period(0);
                     self.ch1.pos = (self.ch1.pos + 1) & 7;
+                    self.ch1.out = DUTY[(self.regs[0x01] >> 6) as usize][self.ch1.pos as usize];
                     changed = true;
                 }
             }
@@ -227,6 +231,7 @@ impl Apu {
                 if self.ch2.timer == 0 {
                     self.ch2.timer = self.square_period(5);
                     self.ch2.pos = (self.ch2.pos + 1) & 7;
+                    self.ch2.out = DUTY[(self.regs[0x06] >> 6) as usize][self.ch2.pos as usize];
                     changed = true;
                 }
             }
@@ -423,25 +428,9 @@ impl Apu {
         }
     }
 
-    fn update_levels(&mut self) {
-        if !self.power {
-            if self.level_l != 0.0 || self.level_r != 0.0 {
-                self.level_changes += 1;
-            }
-            self.level_l = 0.0;
-            self.level_r = 0.0;
-            return;
-        }
-        let sq = |c: &Square, nrx1: u8, nrx2: u8| {
-            let d = if c.enabled {
-                DUTY[(nrx1 >> 6) as usize][c.pos as usize] * c.env.volume
-            } else {
-                0
-            };
-            Self::dac(nrx2 & 0xF8 != 0, d)
-        };
-        let o1 = sq(&self.ch1, self.regs[0x01], self.regs[0x02]);
-        let o2 = sq(&self.ch2, self.regs[0x06], self.regs[0x07]);
+    /// Current 4-bit digital output of each channel (before the DAC), as exposed by PCM12/PCM34.
+    fn digital(&self) -> [u8; 4] {
+        let sq = |c: &Square| if c.enabled { c.out * c.env.volume } else { 0 };
         let d3 = if self.ch3_enabled {
             match (self.regs[0x0C] >> 5) & 3 {
                 0 => 0,
@@ -452,13 +441,44 @@ impl Apu {
         } else {
             0
         };
-        let o3 = Self::dac(self.regs[0x0A] & 0x80 != 0, d3);
         let d4 = if self.ch4_enabled && self.ch4_lfsr & 1 == 0 {
             self.ch4_env.volume
         } else {
             0
         };
-        let o4 = Self::dac(self.regs[0x11] & 0xF8 != 0, d4);
+        [sq(&self.ch1), sq(&self.ch2), d3, d4]
+    }
+
+    /// CGB PCM12 (0xFF76): channel 1 in the low nibble, channel 2 in the high nibble.
+    pub fn pcm12(&self) -> u8 {
+        let d = self.digital();
+        d[0] | d[1] << 4
+    }
+
+    /// CGB PCM34 (0xFF77): channel 3 in the low nibble, channel 4 in the high nibble.
+    pub fn pcm34(&self) -> u8 {
+        let d = self.digital();
+        d[2] | d[3] << 4
+    }
+
+    fn update_levels(&mut self) {
+        if !self.power {
+            if self.level_l != 0.0 || self.level_r != 0.0 {
+                self.level_changes += 1;
+            }
+            self.level_l = 0.0;
+            self.level_r = 0.0;
+            return;
+        }
+        let d = self.digital();
+        let dac_on = [
+            self.regs[0x02] & 0xF8 != 0,
+            self.regs[0x07] & 0xF8 != 0,
+            self.regs[0x0A] & 0x80 != 0,
+            self.regs[0x11] & 0xF8 != 0,
+        ];
+        let o: Vec<f32> = (0..4).map(|i| Self::dac(dac_on[i], d[i])).collect();
+        let (o1, o2, o3, o4) = (o[0], o[1], o[2], o[3]);
         let outs = [o1, o2, o3, o4];
         let nr51 = self.regs[0x15];
         let nr50 = self.regs[0x14];
@@ -665,6 +685,8 @@ impl Apu {
             self.fs = 0;
             self.ch1.pos = 0;
             self.ch2.pos = 0;
+            self.ch1.out = 0;
+            self.ch2.out = 0;
             self.ch3_pos = 0;
         }
         self.update_levels();
@@ -681,7 +703,7 @@ impl Apu {
                 self.ch1.len -= 1;
             }
         }
-        self.ch1.timer = self.square_period(0);
+        self.ch1.timer = self.square_period(0) + 8;
         self.ch1.env.trigger(self.regs[0x02]);
         self.ch1.shadow = self.regs[0x03] as u16 | ((self.regs[0x04] as u16 & 7) << 8);
         let period = (nr10 >> 4) & 7;
@@ -702,7 +724,7 @@ impl Apu {
                 self.ch2.len -= 1;
             }
         }
-        self.ch2.timer = self.square_period(5);
+        self.ch2.timer = self.square_period(5) + 8;
         self.ch2.env.trigger(self.regs[0x07]);
         self.ch2.enabled = dac;
     }
