@@ -11,6 +11,16 @@ pub trait CpuBus {
     fn write(&mut self, addr: u16, val: u8);
     /// Advance one M-cycle without a memory access (internal delay).
     fn tick(&mut self);
+    /// Like [`CpuBus::read`], but a 16-bit register holding `addr` is incremented/decremented in the
+    /// same M-cycle (`ld a,[hli]`, opcode fetch, first read of `pop`). Only matters for the OAM bug.
+    fn read_idu(&mut self, addr: u16) -> u8 {
+        self.read(addr)
+    }
+    /// Like [`CpuBus::tick`], but the increment/decrement unit puts `addr` (the register value before
+    /// the operation) on the address bus (`inc rr`, the `dec sp` of a push). Only matters for the OAM bug.
+    fn tick_idu(&mut self, _addr: u16) {
+        self.tick();
+    }
     /// `IE & IF & 0x1F`: interrupts requested and enabled.
     fn pending_interrupts(&self) -> u8;
     /// Clear the given bit(s) in IF (interrupt acknowledged by dispatch).
@@ -112,7 +122,7 @@ impl Cpu {
         self.ime = false;
         self.ei_pending = false;
         bus.tick();
-        bus.tick();
+        bus.tick_idu(self.regs.sp);
         // EI;HALT with an interrupt pending: the halt bug makes the return address the HALT itself.
         if self.halt_bug {
             self.halt_bug = false;
@@ -137,7 +147,11 @@ impl Cpu {
     }
 
     fn fetch(&mut self, bus: &mut impl CpuBus) -> u8 {
-        let v = bus.read(self.regs.pc);
+        let v = if self.halt_bug {
+            bus.read(self.regs.pc)
+        } else {
+            bus.read_idu(self.regs.pc)
+        };
         if self.halt_bug {
             self.halt_bug = false;
         } else {
@@ -152,7 +166,9 @@ impl Cpu {
         lo | hi << 8
     }
 
+    /// Internal cycle (`dec sp` on the address bus), then the two stack writes.
     fn push(&mut self, bus: &mut impl CpuBus, v: u16) {
+        bus.tick_idu(self.regs.sp);
         self.regs.sp = self.regs.sp.wrapping_sub(1);
         bus.write(self.regs.sp, (v >> 8) as u8);
         self.regs.sp = self.regs.sp.wrapping_sub(1);
@@ -160,7 +176,7 @@ impl Cpu {
     }
 
     fn pop(&mut self, bus: &mut impl CpuBus) -> u16 {
-        let lo = bus.read(self.regs.sp) as u16;
+        let lo = bus.read_idu(self.regs.sp) as u16;
         self.regs.sp = self.regs.sp.wrapping_add(1);
         let hi = bus.read(self.regs.sp) as u16;
         self.regs.sp = self.regs.sp.wrapping_add(1);
@@ -341,7 +357,11 @@ impl Cpu {
                     1 => self.de(),
                     _ => self.hl(),
                 };
-                self.regs.a = bus.read(addr);
+                self.regs.a = if op >> 4 >= 2 {
+                    bus.read_idu(addr)
+                } else {
+                    bus.read(addr)
+                };
                 match op >> 4 {
                     2 => self.set_hl(addr.wrapping_add(1)),
                     3 => self.set_hl(addr.wrapping_sub(1)),
@@ -349,13 +369,13 @@ impl Cpu {
                 }
             }
             0x03 | 0x13 | 0x23 | 0x33 => {
-                bus.tick();
                 let i = op >> 4;
+                bus.tick_idu(self.rr(i));
                 self.set_rr(i, self.rr(i).wrapping_add(1));
             }
             0x0B | 0x1B | 0x2B | 0x3B => {
-                bus.tick();
                 let i = op >> 4;
+                bus.tick_idu(self.rr(i));
                 self.set_rr(i, self.rr(i).wrapping_sub(1));
             }
             0x09 | 0x19 | 0x29 | 0x39 => {
@@ -479,12 +499,10 @@ impl Cpu {
                 self.regs.f = v as u8 & 0xF0;
             }
             0xC5 | 0xD5 | 0xE5 => {
-                bus.tick();
                 let v = self.rr((op >> 4) & 3);
                 self.push(bus, v);
             }
             0xF5 => {
-                bus.tick();
                 let v = (self.regs.a as u16) << 8 | self.regs.f as u16;
                 self.push(bus, v);
             }
@@ -504,7 +522,6 @@ impl Cpu {
             0xC4 | 0xCC | 0xD4 | 0xDC => {
                 let addr = self.fetch16(bus);
                 if self.cond((op >> 3) & 3) {
-                    bus.tick();
                     let pc = self.regs.pc;
                     self.push(bus, pc);
                     self.regs.pc = addr;
@@ -512,13 +529,11 @@ impl Cpu {
             }
             0xCD => {
                 let addr = self.fetch16(bus);
-                bus.tick();
                 let pc = self.regs.pc;
                 self.push(bus, pc);
                 self.regs.pc = addr;
             }
             0xC7 | 0xCF | 0xD7 | 0xDF | 0xE7 | 0xEF | 0xF7 | 0xFF => {
-                bus.tick();
                 let pc = self.regs.pc;
                 self.push(bus, pc);
                 self.regs.pc = (op & 0x38) as u16;
