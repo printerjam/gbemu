@@ -88,6 +88,8 @@ pub struct Ppu {
     /// Dot at which mode 3 ended on the current line (`MODE3_RUNNING` while it is in progress).
     mode0_dot: u16,
     pipe: Pipe,
+    /// Palette register whose OR-glitch value is replaced by the written value on the next dot.
+    pal_fix: Option<(u8, u8)>,
     sprites: [Sprite; 10],
     sprite_count: usize,
     wy_triggered: bool,
@@ -163,6 +165,7 @@ impl Ppu {
             pending_irq: 0,
             mode0_dot: 0,
             pipe: Pipe::default(),
+            pal_fix: None,
             sprites: [Sprite::default(); 10],
             sprite_count: 0,
             wy_triggered: false,
@@ -200,6 +203,29 @@ impl Ppu {
         ppu.update_stat_line();
         ppu.pending_irq = 0;
         ppu
+    }
+
+    /// VRAM as the DMG boot ROM leaves it: the cartridge's logo scaled into tiles 1-24, the (R)
+    /// symbol as tile 25 and the tile map that displays them.
+    pub fn load_boot_vram(&mut self, logo: &[u8; 48]) {
+        let double = |nibble: u8| (0..4).fold(0u8, |acc, b| acc | if nibble >> b & 1 != 0 { 3 << (b * 2) } else { 0 });
+        let mut tile_bytes = Vec::with_capacity(48 * 8);
+        for &byte in logo {
+            for nibble in [byte >> 4, byte & 15] {
+                let v = double(nibble);
+                tile_bytes.extend_from_slice(&[v, 0, v, 0]);
+            }
+        }
+        self.vram[0x10..0x10 + tile_bytes.len()].copy_from_slice(&tile_bytes);
+        const R_SYMBOL: [u8; 8] = [0x3C, 0x42, 0xB9, 0xA5, 0xB9, 0xA5, 0x42, 0x3C];
+        for (i, &b) in R_SYMBOL.iter().enumerate() {
+            self.vram[0x19 * 16 + i * 2] = b;
+        }
+        self.vram[0x1910] = 0x19;
+        for i in 0..12u8 {
+            self.vram[0x1904 + i as usize] = i + 1;
+            self.vram[0x1924 + i as usize] = i + 13;
+        }
     }
 
     /// Replace the four output shades (index = DMG color 0..3). Default is
@@ -358,6 +384,8 @@ impl Ppu {
         } else if self.ly < 144 {
             if self.pipe.active {
                 self.pipe_cycle();
+            } else if self.pipe_draining() {
+                self.pipe_drain();
             }
             if self.dot == MODE3_START {
                 self.start_mode3();
@@ -379,6 +407,9 @@ impl Ppu {
         }
         if self.dot == LINE_PREFIX + 4 {
             self.vblank_oam_irq = false;
+        }
+        if let Some((i, v)) = self.pal_fix.take() {
+            self.regs[i as usize] = v;
         }
         self.update_stat_line();
     }
@@ -549,7 +580,7 @@ impl Ppu {
                     self.stat_line = self.lyc_flag && self.regs[STAT] & 0x40 != 0;
                     self.unlock_all();
                     self.first_line = false;
-                    self.pipe.active = false;
+                    self.pipe = Pipe::default();
                     self.off_dots = 0;
                     self.wy_triggered = false;
                     self.window_line = 0;
@@ -583,6 +614,11 @@ impl Ppu {
             LYC => {
                 self.regs[LYC] = val;
                 self.update_stat_line();
+            }
+            BGP | OBP0 | OBP1 if !self.cgb && self.lcd_on() => {
+                // DMG: for one dot after a palette write the register reads as old | new.
+                self.pal_fix = Some((i as u8, val));
+                self.regs[i] |= val;
             }
             _ => self.regs[i] = val,
         }

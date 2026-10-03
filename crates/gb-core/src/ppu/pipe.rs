@@ -24,8 +24,12 @@ const FETCH_STEPS: u8 = 6;
 const SPRITE_STALL: u8 = 6;
 /// The first sprite of a line costs 3 dots less than the following ones (measured against
 /// mooneye `intr_2_mode0_timing_sprites`).
-const FIRST_SPRITE_STALL: u8 = 3;
+const FIRST_SPRITE_STALL: u8 = 6;
+/// Dots mode 3 ends before the last pixel when any sprite was fetched.
+const SPRITE_TAIL: u16 = 3;
 /// `mode0_dot` while mode 3 is running (never matches a real dot).
+/// Dots between a pixel leaving the FIFOs and its palette/priority lookup.
+const MIX_DELAY: u16 = 7;
 pub(super) const MODE3_RUNNING: u16 = 0xFF00;
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
@@ -42,6 +46,17 @@ struct ObjPx {
     flags: u8,
     /// OAM index (CGB priority).
     idx: u8,
+}
+
+/// A popped pixel waiting for its colour lookup.
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+struct Pending {
+    bg: BgPx,
+    obj: ObjPx,
+    /// Screen X, or 0xFF for margin/discarded pixels (not displayed).
+    x: u8,
+    /// Dot (`cyc`) at which the pixel is mixed.
+    due: u16,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -75,6 +90,17 @@ pub(super) struct Pipe {
     stall: u8,
     wait: u8,
     group: (u8, u8),
+    /// Popped pixels waiting for their palette lookup (`MIX_DELAY` dots after the pop).
+    delay: [Pending; 8],
+    delay_head: u8,
+    delay_len: u8,
+}
+
+impl Pipe {
+    /// Pop count at which the last visible pixel has left the FIFOs.
+    fn pixels_end(&self) -> u16 {
+        8 + self.s as u16 + SCREEN_WIDTH as u16
+    }
 }
 
 impl Ppu {
@@ -89,8 +115,62 @@ impl Ppu {
         self.mode0_dot = MODE3_RUNNING;
     }
 
-    pub(super) fn pipe_cycle(&mut self) {
+    /// Colour the pixel whose delay has elapsed (at most one per dot).
+    fn mix_due(&mut self) {
+        if self.pipe.delay_len == 0 {
+            return;
+        }
+        let head = self.pipe.delay[self.pipe.delay_head as usize];
+        if head.due > self.pipe.cyc {
+            return;
+        }
+        self.pipe.delay_head = (self.pipe.delay_head + 1) & 7;
+        self.pipe.delay_len -= 1;
+        if head.x != 0xFF {
+            let color = self.mix(head);
+            self.framebuffer[self.ly as usize * SCREEN_WIDTH + head.x as usize] = color;
+        }
+    }
+
+    /// Dots after the last pop while its pixels are still being coloured.
+    pub(super) fn pipe_drain(&mut self) {
         self.pipe.cyc += 1;
+        self.mix_due();
+    }
+
+    pub(super) fn pipe_draining(&self) -> bool {
+        self.pipe.delay_len > 0
+    }
+
+    pub(super) fn pipe_cycle(&mut self) {
+        self.pipe_cycle_inner();
+        // With sprites on the line mode 3 ends SPRITE_TAIL dots before the last pixel.
+        let p = &self.pipe;
+        if p.active && p.first_sprite_done && self.mode0_dot == MODE3_RUNNING && !self.sprite_hit_ahead() {
+            let pops_left = p.pixels_end() - p.cx;
+            let dots_left = if p.stall > 0 {
+                p.stall as u16 + pops_left - 1
+            } else {
+                pops_left
+            };
+            if dots_left <= SPRITE_TAIL {
+                self.mode0_dot = MODE3_START + p.cyc;
+            }
+        }
+    }
+
+    /// A sprite will still match the pixel counter before the line ends.
+    fn sprite_hit_ahead(&self) -> bool {
+        let p = &self.pipe;
+        (p.sprite_i as usize..self.sprite_count).any(|j| {
+            let at = self.sprites[j].x as u16 + p.s as u16;
+            at >= p.cx && at < p.pixels_end() && self.regs[LCDC] & 0x02 != 0
+        })
+    }
+
+    fn pipe_cycle_inner(&mut self) {
+        self.pipe.cyc += 1;
+        self.mix_due();
         if self.pipe.cyc <= STARTUP {
             return;
         }
@@ -277,23 +357,30 @@ impl Ppu {
         let cx = self.pipe.cx;
         self.pipe.cx += 1;
         let first_visible = 8 + self.pipe.s as u16;
-        if cx >= first_visible {
-            let x = (cx - first_visible) as usize;
-            if x < SCREEN_WIDTH {
-                let color = self.mix(bg, obj);
-                self.framebuffer[self.ly as usize * SCREEN_WIDTH + x] = color;
-            }
-        }
-        if self.pipe.cx == first_visible + SCREEN_WIDTH as u16 {
+        let x = cx.wrapping_sub(first_visible);
+        let x = if x < SCREEN_WIDTH as u16 { x as u8 } else { 0xFF };
+        let p = &mut self.pipe;
+        let tail = ((p.delay_head + p.delay_len) & 7) as usize;
+        p.delay[tail] = Pending {
+            bg,
+            obj,
+            x,
+            due: p.cyc + MIX_DELAY,
+        };
+        p.delay_len += 1;
+        if self.pipe.cx == self.pipe.pixels_end() {
             self.pipe.active = false;
-            self.mode0_dot = MODE3_START + self.pipe.cyc;
+            if self.mode0_dot == MODE3_RUNNING {
+                self.mode0_dot = MODE3_START + self.pipe.cyc;
+            }
             if self.pipe.win_drawn {
                 self.window_line += 1;
             }
         }
     }
 
-    fn mix(&self, bg: BgPx, obj: ObjPx) -> u32 {
+    fn mix(&self, e: Pending) -> u32 {
+        let (bg, obj) = (e.bg, e.obj);
         let lcdc = self.regs[LCDC];
         let cgb = self.cgb_mode();
         let bg_id = if !cgb && lcdc & 1 == 0 { 0 } else { bg.color };
