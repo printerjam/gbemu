@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: gbemu <rom.gb> [--scale N] [--palette gray|dmg-green|pocket] [--mute]\n\
+const USAGE: &str =
+    "usage: gbemu <rom.gb> [--scale N] [--palette gray|dmg-green|pocket] [--model dmg|cgb|auto] [--mute]\n\
     \x20             [--screenshot-at-frame N --screenshot out.png] [--exit-after-frames N]\n\
     \x20             [--input-script FILE]";
 
@@ -20,6 +21,7 @@ struct Args {
     rom: PathBuf,
     scale: usize,
     palette: [u32; 4],
+    model: Option<gb_core::Model>,
     mute: bool,
     screenshot_at: Option<u64>,
     screenshot: Option<PathBuf>,
@@ -34,6 +36,7 @@ fn parse_args() -> Result<Args, String> {
         rom: PathBuf::new(),
         scale: 4,
         palette: palette("gray").unwrap(),
+        model: None,
         mute: false,
         screenshot_at: None,
         screenshot: None,
@@ -53,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
                 let name = value("--palette")?;
                 a.palette = palette(&name).ok_or(format!("unknown palette {name}"))?;
             }
+            "--model" => a.model = gb_core::Model::parse_choice(&value("--model")?)?,
             "--mute" => a.mute = true,
             "--screenshot-at-frame" => {
                 a.screenshot_at = Some(value(&arg)?.parse().map_err(|_| "bad --screenshot-at-frame")?)
@@ -145,8 +149,13 @@ impl Saver {
     }
 }
 
-fn power_on(rom: &[u8], sav: &Path, sample_rate: u32) -> Result<(GameBoy, Saver), String> {
-    let mut gb = GameBoy::new(rom.to_vec()).map_err(|e| e.to_string())?;
+fn power_on(
+    rom: &[u8],
+    model: Option<gb_core::Model>,
+    sav: &Path,
+    sample_rate: u32,
+) -> Result<(GameBoy, Saver), String> {
+    let mut gb = GameBoy::with_model_choice(rom.to_vec(), model).map_err(|e| e.to_string())?;
     gb.set_sample_rate(sample_rate);
     let mut last = Vec::new();
     if gb.cartridge().has_battery() {
@@ -197,7 +206,7 @@ fn run(args: Args) -> Result<(), String> {
     };
     let sample_rate = audio.as_ref().map_or(44_100, |a| a.sample_rate);
     let sav = args.rom.with_extension("sav");
-    let (mut gb, mut saver) = power_on(&rom, &sav, sample_rate)?;
+    let (mut gb, mut saver) = power_on(&rom, args.model, &sav, sample_rate)?;
 
     let title = gb.cartridge().title();
     let title = if title.trim().is_empty() {
@@ -226,7 +235,7 @@ fn run(args: Args) -> Result<(), String> {
         }
         if window.is_key_pressed(Key::R, KeyRepeat::No) {
             saver.flush(&gb);
-            (gb, saver) = power_on(&rom, &sav, sample_rate)?;
+            (gb, saver) = power_on(&rom, args.model, &sav, sample_rate)?;
             held = [false; KEYMAP.len()];
             frames = 0;
             next_event = 0;
@@ -265,7 +274,11 @@ fn run(args: Args) -> Result<(), String> {
 
         gb.run_frame();
         frames += 1;
-        recolor(gb.framebuffer(), &args.palette, &mut shades);
+        if gb.model() == gb_core::Model::Cgb {
+            shades.copy_from_slice(gb.framebuffer());
+        } else {
+            recolor(gb.framebuffer(), &args.palette, &mut shades);
+        }
         window
             .update_with_buffer(&shades, SCREEN_WIDTH, SCREEN_HEIGHT)
             .map_err(|e| e.to_string())?;

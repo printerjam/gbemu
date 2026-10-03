@@ -63,7 +63,7 @@ fn execute(case: &TestCase, wall_limit: Duration, fb_out: &mut Option<Vec<u32>>)
         Ok(r) => r,
         Err(e) => return Outcome::Fail(format!("read {}: {e}", case.rom.display())),
     };
-    let mut gb = match GameBoy::new(rom) {
+    let mut gb = match GameBoy::with_model_choice(rom, case.model) {
         Ok(g) => g,
         Err(e) => return Outcome::Fail(format!("cartridge: {e:?}")),
     };

@@ -11,6 +11,8 @@ pub trait CpuBus {
     fn write(&mut self, addr: u16, val: u8);
     /// Advance one M-cycle without a memory access (internal delay).
     fn tick(&mut self);
+    /// STOP executed. The bus performs a CGB speed switch if one is armed.
+    fn stop(&mut self) {}
     /// `IE & IF & 0x1F`: interrupts requested and enabled.
     fn pending_interrupts(&self) -> u8;
     /// Clear the given bit(s) in IF (interrupt acknowledged by dispatch).
@@ -32,6 +34,23 @@ pub struct Registers {
 }
 
 impl Registers {
+    /// CGB (CPU-CGB) state after the boot ROM: `cgb_game` = cartridge uses CGB features,
+    /// otherwise the boot ROM leaves the DMG-compatibility values.
+    pub fn post_boot_cgb(cgb_game: bool) -> Self {
+        Registers {
+            a: 0x11,
+            f: 0x80,
+            b: 0x00,
+            c: 0x00,
+            d: if cgb_game { 0x00 } else { 0xFF },
+            e: if cgb_game { 0x08 } else { 0x56 },
+            h: 0x00,
+            l: if cgb_game { 0x7C } else { 0x0D },
+            sp: 0xFFFE,
+            pc: 0x0100,
+        }
+    }
+
     /// DMG (CPU ABC) register state after the boot ROM hands over at 0x0100.
     pub fn post_boot_dmg() -> Self {
         Registers {
@@ -68,8 +87,12 @@ pub struct Cpu {
 
 impl Cpu {
     pub fn new() -> Self {
+        Self::with_registers(Registers::post_boot_dmg())
+    }
+
+    pub fn with_registers(regs: Registers) -> Self {
         Cpu {
-            regs: Registers::post_boot_dmg(),
+            regs,
             ime: false,
             halted: false,
             ei_pending: false,
@@ -306,8 +329,9 @@ impl Cpu {
         match op {
             0x00 => {}
             0x10 => {
-                // STOP: minimal, 2 bytes, no low-power state.
+                // STOP: 2 bytes, no low-power state; on CGB it performs an armed speed switch.
                 self.fetch(bus);
+                bus.stop();
             }
             0x76 => {
                 if bus.pending_interrupts() != 0 {

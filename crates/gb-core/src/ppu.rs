@@ -29,6 +29,20 @@ const OBP1: usize = 9;
 const WY: usize = 10;
 const WX: usize = 11;
 
+/// CGB compatibility-mode palettes (what the CGB boot ROM loads for an unrecognised DMG game),
+/// RGB555, darkest shade last: BG `FFFFFF 7BFF31 0063C6 000000`, OBJ `FFFFFF FF8484 943939 000000`.
+const COMPAT_BG_PAL: [u16; 4] = [0x7FFF, 0x1BEF, 0x6180, 0x0000];
+const COMPAT_OBJ_PAL: [u16; 4] = [0x7FFF, 0x421F, 0x1CF2, 0x0000];
+
+/// Expand a 15-bit CGB color to 0x00RRGGBB with `(x << 3) | (x >> 2)` per channel.
+fn cgb_rgb(c: u16) -> u32 {
+    let ch = |x: u16| {
+        let x = (x & 0x1F) as u32;
+        (x << 3) | (x >> 2)
+    };
+    (ch(c) << 16) | (ch(c >> 5) << 8) | ch(c >> 10)
+}
+
 pub const DEFAULT_PALETTE: [u32; 4] = [0x00FF_FFFF, 0x00AA_AAAA, 0x0055_5555, 0x0000_0000];
 
 #[derive(Clone, Copy, Default)]
@@ -40,7 +54,8 @@ struct Sprite {
 }
 
 pub struct Ppu {
-    vram: Box<[u8; 0x2000]>,
+    /// Both VRAM banks back to back (bank 1 is only used on CGB).
+    vram: Vec<u8>,
     oam: [u8; 0xA0],
     regs: [u8; 12],
     framebuffer: Vec<u32>,
@@ -76,17 +91,47 @@ pub struct Ppu {
     oam_write_lock: bool,
     /// Dots elapsed while the LCD is off (to keep producing blank frames).
     off_dots: u32,
+
+    /// CGB hardware (VRAM bank 1, palette RAM, ...).
+    cgb: bool,
+    /// CGB hardware running a DMG-only cartridge: DMG rendering through palette RAM.
+    compat: bool,
+    /// VBK: selected VRAM bank for CPU access.
+    vbk: u8,
+    /// BCPS/OCPS: palette RAM index (bits 0-5) and auto-increment (bit 7).
+    bcps: u8,
+    ocps: u8,
+    /// OPRI bit 0: 1 = DMG-style X-coordinate sprite priority.
+    opri: u8,
+    bg_pal: [u8; 64],
+    obj_pal: [u8; 64],
+    /// Palette RAM expanded to 0x00RRGGBB.
+    bg_rgb: [u32; 32],
+    obj_rgb: [u32; 32],
+    /// Mode 0 was entered on a visible line since the last `take_hblank`.
+    hblank_event: bool,
 }
 
 impl Ppu {
+    /// DMG hardware.
     pub fn new() -> Self {
+        Self::with_hardware(false, false)
+    }
+
+    /// CGB hardware. `cgb_game`: the cartridge supports CGB; otherwise the PPU runs in
+    /// DMG compatibility mode with the boot ROM's default palettes.
+    pub fn new_cgb(cgb_game: bool) -> Self {
+        Self::with_hardware(true, !cgb_game)
+    }
+
+    fn with_hardware(cgb: bool, compat: bool) -> Self {
         let mut regs = [0u8; 12];
         regs[LCDC] = 0x91;
         regs[BGP] = 0xFC;
         regs[OBP0] = 0xFF;
         regs[OBP1] = 0xFF;
         let mut ppu = Ppu {
-            vram: Box::new([0; 0x2000]),
+            vram: vec![0; 0x4000],
             oam: [0; 0xA0],
             regs,
             framebuffer: vec![DEFAULT_PALETTE[0]; SCREEN_WIDTH * SCREEN_HEIGHT],
@@ -113,7 +158,27 @@ impl Ppu {
             oam_read_lock: false,
             oam_write_lock: false,
             off_dots: 0,
+            cgb,
+            compat,
+            vbk: 0,
+            bcps: 0,
+            ocps: 0,
+            opri: 0,
+            bg_pal: [0xFF; 64],
+            obj_pal: [0xFF; 64],
+            bg_rgb: [0x00FF_FFFF; 32],
+            obj_rgb: [0x00FF_FFFF; 32],
+            hblank_event: false,
         };
+        if compat {
+            ppu.opri = 1;
+            for pal in 0..2 {
+                for (i, (&b, &o)) in COMPAT_BG_PAL.iter().zip(COMPAT_OBJ_PAL.iter()).enumerate() {
+                    ppu.set_pal_entry(false, pal * 4 + i, b);
+                    ppu.set_pal_entry(true, pal * 4 + i, o);
+                }
+            }
+        }
         ppu.update_stat_line();
         ppu.pending_irq = 0;
         ppu
@@ -123,6 +188,41 @@ impl Ppu {
     /// exact grayscale; affects only lines rendered afterwards.
     pub fn set_palette(&mut self, palette: [u32; 4]) {
         self.palette = palette;
+    }
+
+    /// CGB hardware with a CGB cartridge: attributes, banks and palette RAM drive rendering.
+    fn cgb_mode(&self) -> bool {
+        self.cgb && !self.compat
+    }
+
+    fn set_pal_entry(&mut self, obj: bool, entry: usize, c: u16) {
+        let (ram, rgb) = if obj {
+            (&mut self.obj_pal, &mut self.obj_rgb)
+        } else {
+            (&mut self.bg_pal, &mut self.bg_rgb)
+        };
+        ram[entry * 2] = c as u8;
+        ram[entry * 2 + 1] = (c >> 8) as u8;
+        rgb[entry] = cgb_rgb(c);
+    }
+
+    fn pal_locked(&self) -> bool {
+        self.lcd_on() && self.mode == 3
+    }
+
+    /// True while the visible mode is 0 on a line < 144 (HDMA may transfer).
+    pub fn in_hblank(&self) -> bool {
+        self.lcd_on() && self.mode == 0 && self.ly < 144 && !self.first_line
+    }
+
+    /// True once per entry into HBlank on a visible line; clears the flag.
+    pub fn take_hblank(&mut self) -> bool {
+        std::mem::take(&mut self.hblank_event)
+    }
+
+    /// VRAM write for HDMA/GDMA: bypasses mode blocking, honours VBK.
+    pub fn dma_write_vram(&mut self, addr: u16, val: u8) {
+        self.vram[self.vbk as usize * 0x2000 + (addr & 0x1FFF) as usize] = val;
     }
 
     fn lcd_on(&self) -> bool {
@@ -245,6 +345,7 @@ impl Ppu {
                 self.irq_mode = 0;
             } else if self.dot == self.mode0_dot + LINE_PREFIX {
                 self.mode = 0;
+                self.hblank_event = true;
                 self.unlock_all();
             }
         }
@@ -292,8 +393,13 @@ impl Ppu {
             }
         }
         self.sprite_count = n;
-        // DMG priority: lower X first, then OAM order (stable sort).
-        self.sprites[..n].sort_by_key(|s| s.x);
+        // Fetch order is by X (then OAM order); the draw priority follows it
+        // unless CGB sprites are prioritised by OAM order alone.
+        if !self.cgb_mode() || self.opri & 1 != 0 {
+            self.sprites[..n].sort_by_key(|s| s.x);
+        }
+        let mut by_x = self.sprites;
+        by_x[..n].sort_by_key(|s| s.x);
 
         let scx = self.regs[SCX] as u16;
         let mut len = MODE3_BASE_LEN + (scx & 7);
@@ -302,7 +408,7 @@ impl Ppu {
         }
         if self.regs[LCDC] & 0x02 != 0 {
             let mut last_tile = u16::MAX;
-            for s in &self.sprites[..n] {
+            for s in &by_x[..n] {
                 if s.x >= 168 {
                     continue;
                 }
@@ -324,50 +430,64 @@ impl Ppu {
     }
 
     #[inline]
-    fn tile_row(&self, tile: u8, row: u8, sprite: bool) -> (u8, u8) {
+    fn tile_row(&self, tile: u8, row: u8, sprite: bool, bank: u8) -> (u8, u8) {
         let base = if sprite || self.regs[LCDC] & 0x10 != 0 {
             tile as usize * 16
         } else {
             (0x1000 + (tile as i8 as i32) * 16) as usize
         };
-        let a = base + row as usize * 2;
+        let a = bank as usize * 0x2000 + base + row as usize * 2;
         (self.vram[a], self.vram[a + 1])
+    }
+
+    /// One BG/window tile row: `(lo, hi, attributes)`. `map` is the VRAM offset of the tile map
+    /// row, `row` the pixel row within the tile (before CGB y-flip).
+    fn bg_tile(&self, map: usize, col: usize, row: u8, cgb: bool) -> (u8, u8, u8) {
+        let tile = self.vram[map + col];
+        let at = if cgb { self.vram[0x2000 + map + col] } else { 0 };
+        let row = if at & 0x40 != 0 { 7 - row } else { row };
+        let (lo, hi) = self.tile_row(tile, row, false, (at >> 3) & 1);
+        (lo, hi, at)
     }
 
     fn render_line(&mut self) {
         let ly = self.ly;
         let lcdc = self.regs[LCDC];
+        let cgb = self.cgb_mode();
         let mut bg = [0u8; SCREEN_WIDTH]; // color ids
-        if lcdc & 0x01 != 0 {
+        let mut attr = [0u8; SCREEN_WIDTH]; // CGB BG attributes
+        if lcdc & 0x01 != 0 || cgb {
             let scx = self.regs[SCX] as usize;
             let y = ly.wrapping_add(self.regs[SCY]) as usize;
             let map = if lcdc & 0x08 != 0 { 0x1C00 } else { 0x1800 } + (y / 8) * 32;
-            let mut cache = (usize::MAX, 0u8, 0u8);
-            for (x, out) in bg.iter_mut().enumerate() {
+            let mut cache = (usize::MAX, 0u8, 0u8, 0u8);
+            for (x, (out, at_out)) in bg.iter_mut().zip(attr.iter_mut()).enumerate() {
                 let px = (scx + x) & 0xFF;
                 let col = px / 8;
                 if cache.0 != col {
-                    let (lo, hi) = self.tile_row(self.vram[map + col], (y & 7) as u8, false);
-                    cache = (col, lo, hi);
+                    let (lo, hi, at) = self.bg_tile(map, col, (y & 7) as u8, cgb);
+                    cache = (col, lo, hi, at);
                 }
-                let bit = 7 - (px & 7);
+                let bit = if cache.3 & 0x20 != 0 { px & 7 } else { 7 - (px & 7) };
                 *out = ((cache.1 >> bit) & 1) | (((cache.2 >> bit) & 1) << 1);
+                *at_out = cache.3;
             }
             if self.window_starts_here() {
                 let wx = self.regs[WX] as i32 - 7;
                 let map = if lcdc & 0x40 != 0 { 0x1C00 } else { 0x1800 } + (self.window_line as usize / 8) * 32;
                 let row = self.window_line & 7;
-                let mut cache = (usize::MAX, 0u8, 0u8);
+                let mut cache = (usize::MAX, 0u8, 0u8, 0u8);
                 let first = wx.max(0) as usize;
-                for (x, out) in bg.iter_mut().enumerate().skip(first) {
+                for (x, (out, at_out)) in bg.iter_mut().zip(attr.iter_mut()).enumerate().skip(first) {
                     let px = (x as i32 - wx) as usize;
                     let col = px / 8;
                     if cache.0 != col {
-                        let (lo, hi) = self.tile_row(self.vram[map + col], row, false);
-                        cache = (col, lo, hi);
+                        let (lo, hi, at) = self.bg_tile(map, col, row, cgb);
+                        cache = (col, lo, hi, at);
                     }
-                    let bit = 7 - (px & 7);
+                    let bit = if cache.3 & 0x20 != 0 { px & 7 } else { 7 - (px & 7) };
                     *out = ((cache.1 >> bit) & 1) | (((cache.2 >> bit) & 1) << 1);
+                    *at_out = cache.3;
                 }
                 self.window_line += 1;
             }
@@ -375,24 +495,33 @@ impl Ppu {
 
         let bgp = self.regs[BGP];
         let row_out = ly as usize * SCREEN_WIDTH;
-        for (out, &id) in self.framebuffer[row_out..row_out + SCREEN_WIDTH]
-            .iter_mut()
-            .zip(bg.iter())
-        {
-            *out = self.palette[((bgp >> (id * 2)) & 3) as usize];
+        for (x, out) in self.framebuffer[row_out..row_out + SCREEN_WIDTH].iter_mut().enumerate() {
+            let id = bg[x];
+            *out = if cgb {
+                self.bg_rgb[(attr[x] & 7) as usize * 4 + id as usize]
+            } else {
+                let shade = ((bgp >> (id * 2)) & 3) as usize;
+                if self.compat {
+                    self.bg_rgb[shade]
+                } else {
+                    self.palette[shade]
+                }
+            };
         }
 
         if lcdc & 0x02 != 0 {
             let h = self.sprite_height();
             // Draw lowest priority first so higher priority overwrites.
-            let mut buf = [0u8; SCREEN_WIDTH]; // bit7 = present, bit6 = bg priority, bit5 = palette, 0..1 = color
+            let mut color = [0u8; SCREEN_WIDTH]; // 0 = no sprite pixel
+            let mut flags = [0u8; SCREEN_WIDTH];
             for s in self.sprites[..self.sprite_count].iter().rev() {
                 let mut row = (ly as i16 + 16 - s.y as i16) as u8;
                 if s.flags & 0x40 != 0 {
                     row = h - 1 - row;
                 }
                 let tile = if h == 16 { s.tile & 0xFE } else { s.tile };
-                let (lo, hi) = self.tile_row(tile, row, true);
+                let bank = if cgb { (s.flags >> 3) & 1 } else { 0 };
+                let (lo, hi) = self.tile_row(tile, row, true, bank);
                 for i in 0..8u8 {
                     let sx = s.x as i16 - 8 + i as i16;
                     if !(0..SCREEN_WIDTH as i16).contains(&sx) {
@@ -401,17 +530,36 @@ impl Ppu {
                     let bit = if s.flags & 0x20 != 0 { i } else { 7 - i };
                     let c = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
                     if c != 0 {
-                        buf[sx as usize] = 0x80 | (s.flags & 0x80) >> 1 | (s.flags & 0x10) << 1 | c;
+                        color[sx as usize] = c;
+                        flags[sx as usize] = s.flags;
                     }
                 }
             }
             for x in 0..SCREEN_WIDTH {
-                let p = buf[x];
-                if p & 0x80 == 0 || (p & 0x40 != 0 && bg[x] != 0) {
+                let c = color[x];
+                let f = flags[x];
+                if c == 0 {
                     continue;
                 }
-                let pal = self.regs[if p & 0x20 != 0 { OBP1 } else { OBP0 }];
-                self.framebuffer[row_out + x] = self.palette[((pal >> ((p & 3) * 2)) & 3) as usize];
+                let bg_wins = if cgb {
+                    lcdc & 0x01 != 0 && (f & 0x80 != 0 || attr[x] & 0x80 != 0)
+                } else {
+                    f & 0x80 != 0
+                };
+                if bg_wins && bg[x] != 0 {
+                    continue;
+                }
+                self.framebuffer[row_out + x] = if cgb {
+                    self.obj_rgb[(f & 7) as usize * 4 + c as usize]
+                } else {
+                    let obp = (f >> 4) & 1;
+                    let shade = ((self.regs[OBP0 + obp as usize] >> (c * 2)) & 3) as usize;
+                    if self.compat {
+                        self.obj_rgb[obp as usize * 4 + shade]
+                    } else {
+                        self.palette[shade]
+                    }
+                };
             }
         }
     }
@@ -428,12 +576,12 @@ impl Ppu {
         if self.vram_read_lock {
             0xFF
         } else {
-            self.vram[(addr & 0x1FFF) as usize]
+            self.vram[self.vbk as usize * 0x2000 + (addr & 0x1FFF) as usize]
         }
     }
     pub fn write_vram(&mut self, addr: u16, val: u8) {
         if !self.vram_write_lock {
-            self.vram[(addr & 0x1FFF) as usize] = val;
+            self.vram[self.vbk as usize * 0x2000 + (addr & 0x1FFF) as usize] = val;
         }
     }
     /// `addr` in 0xFE00..=0xFE9F. CPU view (0xFF while blocked in modes 2/3).
@@ -455,6 +603,26 @@ impl Ppu {
     }
     /// `addr` in 0xFF40..=0xFF4B (never 0xFF46; the bus owns DMA).
     pub fn read_reg(&self, addr: u16) -> u8 {
+        match addr {
+            0xFF4F => return if self.cgb { 0xFE | self.vbk } else { 0xFF },
+            0xFF68 => return if self.cgb { 0x40 | self.bcps } else { 0xFF },
+            0xFF6A => return if self.cgb { 0x40 | self.ocps } else { 0xFF },
+            0xFF69 | 0xFF6B if self.cgb => {
+                let (ram, ps) = if addr == 0xFF69 {
+                    (&self.bg_pal, self.bcps)
+                } else {
+                    (&self.obj_pal, self.ocps)
+                };
+                return if self.pal_locked() {
+                    0xFF
+                } else {
+                    ram[(ps & 0x3F) as usize]
+                };
+            }
+            0xFF6C => return if self.cgb { 0xFE | self.opri } else { 0xFF },
+            0xFF40..=0xFF4B => {}
+            _ => return 0xFF,
+        }
         let i = (addr - 0xFF40) as usize;
         match i {
             STAT => {
@@ -472,6 +640,10 @@ impl Ppu {
         }
     }
     pub fn write_reg(&mut self, addr: u16, val: u8) {
+        if !(0xFF40..=0xFF4B).contains(&addr) {
+            self.write_cgb_reg(addr, val);
+            return;
+        }
         let i = (addr - 0xFF40) as usize;
         match i {
             LCDC => {
@@ -490,7 +662,8 @@ impl Ppu {
                     self.off_dots = 0;
                     self.wy_triggered = false;
                     self.window_line = 0;
-                    self.framebuffer.fill(self.palette[0]);
+                    self.framebuffer
+                        .fill(if self.cgb { 0x00FF_FFFF } else { self.palette[0] });
                 } else if !was_on && on {
                     // Line 0 after LCD-on has no OAM scan: mode 0 until mode 3.
                     self.ly = 0;
@@ -503,7 +676,7 @@ impl Ppu {
                 }
             }
             STAT => {
-                if self.lcd_on() {
+                if self.lcd_on() && !self.cgb {
                     // DMG quirk: during the write all STAT sources read as
                     // enabled for one cycle.
                     let blip = self.stat_conditions(0x78);
@@ -521,6 +694,42 @@ impl Ppu {
                 self.update_stat_line();
             }
             _ => self.regs[i] = val,
+        }
+    }
+
+    fn write_cgb_reg(&mut self, addr: u16, val: u8) {
+        if !self.cgb {
+            return;
+        }
+        match addr {
+            0xFF4F => self.vbk = val & 1,
+            0xFF68 => self.bcps = val & 0xBF,
+            0xFF6A => self.ocps = val & 0xBF,
+            0xFF69 | 0xFF6B => {
+                let obj = addr == 0xFF6B;
+                let ps = if obj { self.ocps } else { self.bcps };
+                let idx = (ps & 0x3F) as usize;
+                if !self.pal_locked() {
+                    let ram = if obj { &mut self.obj_pal } else { &mut self.bg_pal };
+                    ram[idx] = val;
+                    let c = ram[idx & !1] as u16 | (ram[idx | 1] as u16) << 8;
+                    if obj {
+                        self.obj_rgb[idx / 2] = cgb_rgb(c);
+                    } else {
+                        self.bg_rgb[idx / 2] = cgb_rgb(c);
+                    }
+                }
+                if ps & 0x80 != 0 {
+                    let next = (ps & 0x80) | ((idx as u8 + 1) & 0x3F);
+                    if obj {
+                        self.ocps = next;
+                    } else {
+                        self.bcps = next;
+                    }
+                }
+            }
+            0xFF6C => self.opri = val & 1,
+            _ => {}
         }
     }
 
