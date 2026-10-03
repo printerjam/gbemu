@@ -1,6 +1,7 @@
 //! `gbtest`: headless test-ROM runner and project scoreboard.
 
 mod exec;
+mod extra;
 mod image;
 mod suites;
 mod trace;
@@ -20,7 +21,8 @@ usage:
   gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--wav out.wav] [--until-ldbb]
   gbtest trace <rom> [--steps N] [--doctor]
 
-suites: blargg, mooneye, mooneye-mbc, acid2, mbc3 (scored); blargg-extra (not scored)
+suites: blargg, mooneye, mooneye-mbc, acid2, mbc3 (scored); every other suite is not scored; see --list
+(`*-cgb` suites and gbmicrotest-manual are listed but not run)
 default suites: the scored ones. Exit code is 0 for any scoreboard run.
 
 trace: one line per executed instruction (default 1000000). --doctor emits Gameboy Doctor
@@ -128,6 +130,14 @@ fn main() {
     if o.list {
         list(&cases);
         return;
+    }
+    let skipped = cases.len();
+    cases.retain(|c| SUITES.iter().any(|s| s.name == c.suite && s.runnable));
+    if cases.len() != skipped {
+        eprintln!(
+            "note: skipped {} ROMs of suites that need a CGB model",
+            skipped - cases.len()
+        );
     }
     exec::install_quiet_panic_hook();
     let started = Instant::now();

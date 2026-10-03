@@ -52,5 +52,5 @@ jobs:
         run: |
           {
             echo "## Test ROM scoreboard"
-            target/release/gbtest --roms roms --suite blargg --suite blargg-extra --suite mooneye --suite mooneye-mbc --suite acid2 --suite mbc3 --markdown
+            scripts/scoreboard.sh --markdown
           } >> "$GITHUB_STEP_SUMMARY"

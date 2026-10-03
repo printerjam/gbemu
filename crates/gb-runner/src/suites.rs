@@ -16,6 +16,22 @@ pub enum Detect {
         reference: PathBuf,
         buttons: Vec<gb_core::Button>,
     },
+    /// GBMicrotest: result byte at 0xFF82 (1 = pass, 0xFF = fail).
+    Microtest,
+    /// wilbertpol mooneye: exit via undefined opcode 0xED, Fibonacci register signature.
+    MooneyeEd,
+    /// Gambatte: run 16 frames, then check the screen or the last frame's audio.
+    Gambatte(GambatteExpect),
+}
+
+#[derive(Clone, Debug)]
+pub enum GambatteExpect {
+    /// Hex digits drawn in the top-left corner as 8x8 monochrome glyphs.
+    Hex(String),
+    /// `true`: the last frame must contain audio output; `false`: it must be silent.
+    Audio(bool),
+    /// Pixel-exact screenshot.
+    Png(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -32,32 +48,130 @@ pub struct SuiteInfo {
     pub name: &'static str,
     /// Counts towards `SCORE:`.
     pub scored: bool,
+    /// `false` for suites that cannot run yet (need a CGB model, or have no automatic verdict): listed only.
+    pub runnable: bool,
 }
 
 pub const SUITES: &[SuiteInfo] = &[
     SuiteInfo {
         name: "blargg",
         scored: true,
+        runnable: true,
     },
     SuiteInfo {
         name: "mooneye",
         scored: true,
+        runnable: true,
     },
     SuiteInfo {
         name: "mooneye-mbc",
         scored: true,
+        runnable: true,
     },
     SuiteInfo {
         name: "acid2",
         scored: true,
+        runnable: true,
     },
     SuiteInfo {
         name: "mbc3",
         scored: true,
+        runnable: true,
     },
     SuiteInfo {
         name: "blargg-extra",
         scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "gbmicrotest",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "gambatte",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "age",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "same-suite",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "mealybug",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "scribbltests",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "turtle-tests",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "bully",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "strikethrough",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "little-things",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "mooneye-wilbertpol",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "mooneye-extra",
+        scored: false,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "gbmicrotest-manual",
+        scored: false,
+        runnable: false,
+    },
+    SuiteInfo {
+        name: "gambatte-cgb",
+        scored: false,
+        runnable: false,
+    },
+    SuiteInfo {
+        name: "age-cgb",
+        scored: false,
+        runnable: false,
+    },
+    SuiteInfo {
+        name: "same-suite-cgb",
+        scored: false,
+        runnable: false,
+    },
+    SuiteInfo {
+        name: "mealybug-cgb",
+        scored: false,
+        runnable: false,
+    },
+    SuiteInfo {
+        name: "mooneye-cgb",
+        scored: false,
+        runnable: false,
     },
 ];
 
@@ -67,20 +181,25 @@ pub fn is_scored(suite: &str) -> bool {
 
 /// Recursively collect `*.gb` files, sorted.
 pub fn walk_gb(dir: &Path) -> Vec<PathBuf> {
+    walk(dir, &["gb"])
+}
+
+/// Recursively collect files with any of `exts`, sorted.
+pub fn walk(dir: &Path, exts: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    fn rec(dir: &Path, out: &mut Vec<PathBuf>) {
+    fn rec(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
         entries.sort();
         for p in entries {
             if p.is_dir() {
-                rec(&p, out);
-            } else if p.extension().is_some_and(|e| e == "gb") {
+                rec(&p, exts, out);
+            } else if p.extension().is_some_and(|e| exts.iter().any(|x| e == *x)) {
                 out.push(p);
             }
         }
     }
-    rec(dir, &mut out);
+    rec(dir, exts, &mut out);
     out
 }
 
@@ -289,6 +408,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
         vec![Down, Down, A],
         margin(26.0),
     );
+    crate::extra::discover(roms, &mut cases);
     cases
 }
 

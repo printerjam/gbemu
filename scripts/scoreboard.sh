@@ -2,6 +2,7 @@
 # Run every test-ROM suite and compare against scoreboard-baseline.json.
 #   scripts/scoreboard.sh            exit 1 if any baseline-passing test now fails (or vanished)
 #   scripts/scoreboard.sh --update   rewrite the baseline from the current results
+#   scripts/scoreboard.sh --markdown print gbtest's markdown suite table (no comparison)
 # Extra arguments after the mode flag are passed to gbtest (e.g. --long).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,9 +11,18 @@ update=0
 if [ "${1:-}" = "--update" ]; then update=1; shift; fi
 
 cargo build --release -q -p gb-runner
+# Every runnable suite; the *-cgb suites and gbmicrotest-manual are list-only (see `gbtest --list`).
+suites=()
+for s in blargg blargg-extra mooneye mooneye-mbc acid2 mbc3 gbmicrotest gambatte age same-suite mealybug \
+  scribbltests turtle-tests bully strikethrough little-things mooneye-wilbertpol mooneye-extra; do
+  suites+=(--suite "$s")
+done
+if [ "${1:-}" = "--markdown" ]; then
+  shift
+  exec target/release/gbtest --roms roms "${suites[@]}" --markdown "$@"
+fi
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
-suites=(--suite blargg --suite blargg-extra --suite mooneye --suite mooneye-mbc --suite acid2 --suite mbc3)
 target/release/gbtest --roms roms "${suites[@]}" --json "$@" > "$tmp"
 
 python3 - "$tmp" scoreboard-baseline.json "$update" <<'PY'

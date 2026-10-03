@@ -98,6 +98,9 @@ pub struct Apu {
     /// length counters cleared by power-off and locked while off.
     #[serde(default)]
     cgb: bool,
+    /// Number of times the mixed output level changed (test-harness probe: "was the output silent/constant").
+    #[serde(skip)]
+    level_changes: u64,
     #[serde(with = "crate::state::bytes")]
     regs: [u8; 0x30],
     #[serde(with = "crate::state::bytes")]
@@ -147,6 +150,7 @@ impl Apu {
             wave_ram: [0; 16],
             sample_rate: 48_000,
             cgb: false,
+            level_changes: 0,
             power: true,
             fs: 0,
             ch1: Square::new(),
@@ -421,6 +425,9 @@ impl Apu {
 
     fn update_levels(&mut self) {
         if !self.power {
+            if self.level_l != 0.0 || self.level_r != 0.0 {
+                self.level_changes += 1;
+            }
             self.level_l = 0.0;
             self.level_r = 0.0;
             return;
@@ -464,8 +471,12 @@ impl Apu {
             }
             s * (vol + 1) as f32 / 8.0 / 4.0
         };
-        self.level_r = mix(nr51 & 0xF, nr50 & 7);
-        self.level_l = mix(nr51 >> 4, (nr50 >> 4) & 7);
+        let (r, l) = (mix(nr51 & 0xF, nr50 & 7), mix(nr51 >> 4, (nr50 >> 4) & 7));
+        if r != self.level_r || l != self.level_l {
+            self.level_changes += 1;
+        }
+        self.level_r = r;
+        self.level_l = l;
     }
 
     // ------------------------------------------------------------- registers
@@ -739,6 +750,11 @@ impl Apu {
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Count of mixed-output level changes since power-on; constant across an interval means silence/DC.
+    pub fn level_changes(&self) -> u64 {
+        self.level_changes
     }
 
     /// Select CGB (true) or DMG (false) APU behaviour.

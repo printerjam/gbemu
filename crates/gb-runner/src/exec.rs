@@ -1,7 +1,7 @@
 //! Running a single test ROM to a verdict.
 
 use crate::image::{diff_pixels, load_png, Image};
-use crate::suites::{Detect, TestCase};
+use crate::suites::{Detect, GambatteExpect, TestCase};
 use gb_core::{GameBoy, CLOCK_HZ, CYCLES_PER_FRAME, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -74,6 +74,9 @@ fn execute(case: &TestCase, wall_limit: Duration, fb_out: &mut Option<Vec<u32>>)
         Detect::Mooneye => run_mooneye(&mut gb, limit, wall_limit),
         Detect::Acid2 { reference } => run_acid2(&mut gb, limit, wall_limit, reference),
         Detect::Screen { reference, buttons } => run_screen(&mut gb, limit, wall_limit, reference, buttons),
+        Detect::Microtest => run_microtest(&mut gb, limit, wall_limit),
+        Detect::MooneyeEd => run_mooneye_ed(&mut gb, limit, wall_limit),
+        Detect::Gambatte(expect) => run_gambatte(&mut gb, expect),
     };
     *fb_out = Some(gb.framebuffer().to_vec());
     outcome
@@ -288,5 +291,114 @@ fn run_screen(
             let d = diff_pixels(gb.framebuffer(), &img, SCREEN_WIDTH, SCREEN_HEIGHT);
             Outcome::Fail(format!("{kind} after {frame} frames, {d} px differ"))
         }
+    }
+}
+
+/// GBMicrotest: 0xFF82 holds 0x01 on pass and 0xFF on fail.
+fn run_microtest(gb: &mut GameBoy, limit: u64, wall: Duration) -> Outcome {
+    let r = drive(
+        gb,
+        limit,
+        wall,
+        |_, _| None,
+        |gb| match gb.bus.peek(0xFF82) {
+            0x01 => Some(Outcome::Pass),
+            0xFF => Some(Outcome::Fail(format!(
+                "result {:02X}, expected {:02X}",
+                gb.bus.peek(0xFF80),
+                gb.bus.peek(0xFF81)
+            ))),
+            _ => None,
+        },
+    );
+    match r {
+        Ok(o) => o,
+        Err(kind) => Outcome::Fail(format!("{kind}: no result at 0xFF82")),
+    }
+}
+
+/// wilbertpol mooneye: the ROM finishes by executing the undefined opcode 0xED.
+fn run_mooneye_ed(gb: &mut GameBoy, limit: u64, wall: Duration) -> Outcome {
+    let r = drive(
+        gb,
+        limit,
+        wall,
+        |gb, op| (op == Some(0xED)).then(|| mooneye_verdict(gb)),
+        |_| None,
+    );
+    match r {
+        Ok(o) => o,
+        Err(kind) => Outcome::Fail(timeout_msg(gb, kind)),
+    }
+}
+
+/// Glyphs of gambatte's hex result display: one byte per row, bit 7 = leftmost pixel, set = black.
+const HEX_TILES: [[u8; 8]; 16] = [
+    [0x00, 0x7F, 0x41, 0x41, 0x41, 0x41, 0x41, 0x7F],
+    [0x00, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08],
+    [0x00, 0x7F, 0x01, 0x01, 0x7F, 0x40, 0x40, 0x7F],
+    [0x00, 0x7F, 0x01, 0x01, 0x3F, 0x01, 0x01, 0x7F],
+    [0x00, 0x41, 0x41, 0x41, 0x7F, 0x01, 0x01, 0x01],
+    [0x00, 0x7F, 0x40, 0x40, 0x7E, 0x01, 0x01, 0x7E],
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x41, 0x41, 0x7F],
+    [0x00, 0x7F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10],
+    [0x00, 0x3E, 0x41, 0x41, 0x3E, 0x41, 0x41, 0x3E],
+    [0x00, 0x7F, 0x41, 0x41, 0x7F, 0x01, 0x01, 0x7F],
+    [0x00, 0x08, 0x22, 0x41, 0x7F, 0x41, 0x41, 0x41],
+    [0x00, 0x7E, 0x41, 0x41, 0x7E, 0x41, 0x41, 0x7E],
+    [0x00, 0x3E, 0x41, 0x40, 0x40, 0x40, 0x41, 0x3E],
+    [0x00, 0x7E, 0x41, 0x41, 0x41, 0x41, 0x41, 0x7E],
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x40, 0x40, 0x7F],
+    [0x00, 0x7F, 0x40, 0x40, 0x7F, 0x40, 0x40, 0x40],
+];
+
+pub fn hex_matches(fb: &[u32], digits: &str) -> bool {
+    digits.chars().enumerate().all(|(i, c)| {
+        let tile = &HEX_TILES[c.to_digit(16).unwrap_or(0) as usize];
+        (0..8).all(|y| {
+            (0..8).all(|x| {
+                // Gambatte compares with the low three bits of each channel masked off.
+                let px = fb[y * SCREEN_WIDTH + i * 8 + x] & 0xF8F8F8;
+                px == if tile[y] & (0x80 >> x) != 0 { 0 } else { 0xF8F8F8 }
+            })
+        })
+    })
+}
+
+/// Gambatte runs every ROM for 16 frames; audio tests look at output changes during the last one.
+fn run_gambatte(gb: &mut GameBoy, expect: &GambatteExpect) -> Outcome {
+    let frame = CYCLES_PER_FRAME as u64;
+    while gb.cycles() < 15 * frame {
+        gb.step();
+    }
+    let before = gb.bus.apu.level_changes();
+    while gb.cycles() < 16 * frame {
+        gb.step();
+    }
+    match expect {
+        GambatteExpect::Hex(digits) => {
+            if hex_matches(gb.framebuffer(), digits) {
+                Outcome::Pass
+            } else {
+                Outcome::Fail(format!("screen does not show {digits}"))
+            }
+        }
+        GambatteExpect::Audio(want_sound) => {
+            let changes = gb.bus.apu.level_changes() - before;
+            if (changes > 0) == *want_sound {
+                Outcome::Pass
+            } else if *want_sound {
+                Outcome::Fail("expected audio, got silence".into())
+            } else {
+                Outcome::Fail(format!("expected silence, output changed {changes}x"))
+            }
+        }
+        GambatteExpect::Png(path) => match load_png(path) {
+            Ok(img) => match diff_pixels(gb.framebuffer(), &img, SCREEN_WIDTH, SCREEN_HEIGHT) {
+                0 => Outcome::Pass,
+                d => Outcome::Fail(format!("{d} px differ")),
+            },
+            Err(e) => Outcome::Fail(e),
+        },
     }
 }
