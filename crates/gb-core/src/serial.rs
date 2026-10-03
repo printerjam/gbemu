@@ -3,14 +3,14 @@
 
 use crate::irq;
 
-/// Internal clock: 8192 Hz bit rate = 128 M-cycles per bit.
-const M_CYCLES_PER_BIT: u16 = 128;
+/// The internal serial clock (8192 Hz) is DIV-counter bit 8: one bit is shifted on each falling edge
+/// (512 T-cycles), so a transfer started mid-period is aligned to the divider.
+const CLOCK_BIT: u16 = 0x100;
 
 pub struct Serial {
     sb: u8,
     sc: u8,
     bits_left: u8,
-    counter: u16,
     output: Vec<u8>,
 }
 
@@ -20,21 +20,16 @@ impl Serial {
             sb: 0,
             sc: 0x7E,
             bits_left: 0,
-            counter: 0,
             output: Vec::new(),
         }
     }
 
-    /// Advance one M-cycle. Returns IF bits to raise.
-    pub fn tick(&mut self) -> u8 {
-        if self.bits_left == 0 {
+    /// The divider counter changed from `div_before` to `div_after` (one M-cycle, or a DIV reset).
+    /// Returns IF bits to raise.
+    pub fn clock(&mut self, div_before: u16, div_after: u16) -> u8 {
+        if self.bits_left == 0 || div_before & CLOCK_BIT == 0 || div_after & CLOCK_BIT != 0 {
             return 0;
         }
-        self.counter += 1;
-        if self.counter < M_CYCLES_PER_BIT {
-            return 0;
-        }
-        self.counter = 0;
         self.sb = (self.sb << 1) | 1;
         self.bits_left -= 1;
         if self.bits_left == 0 {
@@ -60,7 +55,6 @@ impl Serial {
                 if val & 0x81 == 0x81 {
                     self.output.push(self.sb);
                     self.bits_left = 8;
-                    self.counter = 0;
                 }
             }
         }

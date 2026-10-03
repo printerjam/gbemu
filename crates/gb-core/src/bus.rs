@@ -66,7 +66,11 @@ impl Bus {
         if div_before & 0x1000 != 0 && self.timer.div_counter() & 0x1000 == 0 {
             self.apu.frame_sequencer_step();
         }
-        irqs |= self.serial.tick();
+        // The divider as modelled here lags the hardware counter by one M-cycle (see Timer::new), so the
+        // serial clock edge is taken 4 T ahead (mooneye serial/boot_sclk_align).
+        irqs |= self
+            .serial
+            .clock(div_before.wrapping_add(4), self.timer.div_counter().wrapping_add(4));
         irqs |= self.ppu.tick(4);
         self.apu.tick(4);
         self.cart.tick();
@@ -147,9 +151,11 @@ impl Bus {
             0xFF04..=0xFF07 => {
                 let before = self.timer.div_counter();
                 self.timer.write(addr, val);
-                if before & 0x1000 != 0 && self.timer.div_counter() & 0x1000 == 0 {
+                let after = self.timer.div_counter();
+                if before & 0x1000 != 0 && after & 0x1000 == 0 {
                     self.apu.frame_sequencer_step();
                 }
+                self.int_flag |= self.serial.clock(before, after);
             }
             0xFF0F => self.int_flag = val & 0x1F,
             0xFF10..=0xFF3F => self.apu.write(addr, val),
