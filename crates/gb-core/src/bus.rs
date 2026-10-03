@@ -374,6 +374,11 @@ impl Bus {
                 self.int_flag |= self.serial.clock(before, self.timer.div_counter());
             }
             0xFF0F => self.int_flag = val & 0x1F,
+            0xFF26 => {
+                let mask = if self.double_speed { 0x2000 } else { 0x1000 };
+                self.apu.set_div_bit(self.timer.div_counter() & mask != 0);
+                self.apu.write(addr, val)
+            }
             0xFF10..=0xFF3F => self.apu.write(addr, val),
             0xFF46 => {
                 self.dma.reg = val;

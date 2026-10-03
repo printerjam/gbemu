@@ -137,6 +137,14 @@ pub struct Apu {
     /// length counters cleared by power-off and locked while off.
     #[serde(default)]
     cgb: bool,
+    /// DIV bit that clocks the frame sequencer, sampled by the bus just before an NR52 write.
+    #[serde(skip)]
+    div_bit: bool,
+    /// Powered on while the DIV bit was high: the first frame sequencer event is skipped.
+    skip_fs: bool,
+    /// After such a power-on the sequencer behaves as if its next step were odd until the first event runs.
+    #[serde(skip)]
+    fs_quirk_odd: bool,
     /// Cycle counter value when the APU was last powered on: the 1 MHz channel clock phase restarts there.
     #[serde(skip)]
     power_on_at: u64,
@@ -193,6 +201,9 @@ impl Apu {
             sample_rate: 48_000,
             cgb: false,
             power_on_at: 0,
+            div_bit: false,
+            skip_fs: false,
+            fs_quirk_odd: false,
             level_changes: 0,
             power: true,
             fs: 0,
@@ -329,6 +340,11 @@ impl Apu {
         if !self.power {
             return;
         }
+        if self.skip_fs {
+            self.skip_fs = false;
+            return;
+        }
+        self.fs_quirk_odd = false;
         let step = self.fs;
         self.fs = (self.fs + 1) & 7;
         if step & 1 == 0 {
@@ -350,6 +366,11 @@ impl Apu {
             }
         }
         self.update_levels();
+    }
+
+    /// The next sequencer step does not clock the length counters (so enabling a length now clocks it once).
+    fn fs_odd(&self) -> bool {
+        self.fs & 1 == 1 || self.fs_quirk_odd
     }
 
     fn clock_lengths(&mut self) {
@@ -616,7 +637,7 @@ impl Apu {
             }
             return;
         }
-        let odd = self.fs & 1 == 1;
+        let odd = self.fs_odd();
         match i {
             0x00 => {
                 if self.regs[0] & 8 != 0 && val & 8 == 0 && self.ch1.negate_used {
@@ -739,6 +760,8 @@ impl Apu {
         } else {
             self.power = true;
             self.power_on_at = self.cycles;
+            self.skip_fs = self.div_bit;
+            self.fs_quirk_odd = self.div_bit;
             self.fs = 0;
             self.ch1.pos = 0;
             self.ch2.pos = 0;
@@ -756,7 +779,7 @@ impl Apu {
         let dac = self.regs[0x02] & 0xF8 != 0;
         if self.ch1.len == 0 {
             self.ch1.len = 64;
-            if self.regs[0x04] & 0x40 != 0 && self.fs & 1 == 1 {
+            if self.regs[0x04] & 0x40 != 0 && self.fs_odd() {
                 self.ch1.len -= 1;
             }
         }
@@ -777,7 +800,7 @@ impl Apu {
         let dac = self.regs[0x07] & 0xF8 != 0;
         if self.ch2.len == 0 {
             self.ch2.len = 64;
-            if self.regs[0x09] & 0x40 != 0 && self.fs & 1 == 1 {
+            if self.regs[0x09] & 0x40 != 0 && self.fs_odd() {
                 self.ch2.len -= 1;
             }
         }
@@ -790,7 +813,7 @@ impl Apu {
         let dac = self.regs[0x0A] & 0x80 != 0;
         if self.ch3_len == 0 {
             self.ch3_len = 256;
-            if self.regs[0x0E] & 0x40 != 0 && self.fs & 1 == 1 {
+            if self.regs[0x0E] & 0x40 != 0 && self.fs_odd() {
                 self.ch3_len -= 1;
             }
         }
@@ -815,7 +838,7 @@ impl Apu {
         let dac = self.regs[0x11] & 0xF8 != 0;
         if self.ch4_len == 0 {
             self.ch4_len = 64;
-            if self.regs[0x13] & 0x40 != 0 && self.fs & 1 == 1 {
+            if self.regs[0x13] & 0x40 != 0 && self.fs_odd() {
                 self.ch4_len -= 1;
             }
         }
@@ -834,6 +857,11 @@ impl Apu {
     /// Count of mixed-output level changes since power-on; constant across an interval means silence/DC.
     pub fn level_changes(&self) -> u64 {
         self.level_changes
+    }
+
+    /// Tell the APU the state of the frame-sequencer DIV bit (called by the bus before NR52 writes).
+    pub fn set_div_bit(&mut self, high: bool) {
+        self.div_bit = high;
     }
 
     /// Select CGB (true) or DMG (false) APU behaviour.
