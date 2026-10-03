@@ -33,6 +33,12 @@ struct Envelope {
     timer: u8,
     /// Still doing automatic updates (cleared when the volume reaches its limit).
     active: bool,
+    // CGB model (after SameBoy's reverse engineering): a free-running 3-bit countdown, a pending-tick flag set
+    // half a sequencer period after the countdown reaches zero, and a lock that stops overflow.
+    countdown: u8,
+    clock: bool,
+    should_lock: bool,
+    locked: bool,
 }
 
 impl Envelope {
@@ -40,9 +46,80 @@ impl Envelope {
         self.volume = nrx2 >> 4;
         self.timer = Self::period(nrx2);
         self.active = true;
+        self.countdown = nrx2 & 7;
+        self.clock = false;
+        self.locked = false;
+    }
+
+    fn set_clock(&mut self, value: bool, add: bool) {
+        if self.clock == value {
+            return;
+        }
+        if value {
+            self.clock = true;
+            self.should_lock = (self.volume == 15 && add) || (self.volume == 0 && !add);
+        } else {
+            self.clock = false;
+            self.locked |= self.should_lock;
+        }
+    }
+
+    /// CGB sequencer event: apply a pending envelope tick.
+    fn cgb_tick(&mut self, nrx2: u8) {
+        self.set_clock(false, false);
+        if self.locked || nrx2 & 7 == 0 {
+            return;
+        }
+        self.volume = if nrx2 & 8 != 0 { self.volume + 1 } else { self.volume.wrapping_sub(1) } & 15;
+    }
+
+    /// CGB: the countdown runs every 64 Hz step whether or not the envelope is enabled.
+    fn cgb_countdown(&mut self) {
+        if !self.clock {
+            self.countdown = self.countdown.wrapping_sub(1) & 7;
+        }
+    }
+
+    /// CGB: half a sequencer period later, an expired countdown reloads and queues a tick.
+    fn cgb_reload(&mut self, nrx2: u8) {
+        if self.countdown == 0 {
+            self.countdown = nrx2 & 7;
+            self.set_clock(self.countdown != 0, nrx2 & 8 != 0);
+        }
+    }
+
+    /// NRx2 write on a running channel, CGB (SameBoy's `_nrx2_glitch`).
+    fn cgb_glitch(&mut self, new: u8, old: u8) {
+        if self.clock {
+            self.countdown = new & 7;
+        }
+        let mut tick = new & 7 != 0 && old & 7 == 0 && !self.locked;
+        let invert = (new ^ old) & 8 != 0;
+        if new & 0xF == 8 && old & 0xF == 8 && !self.locked {
+            tick = true;
+        }
+        let mut v = self.volume;
+        if invert {
+            if new & 8 != 0 {
+                v = if old & 7 == 0 && !self.locked { v ^ 0xF } else { 0xEu8.wrapping_sub(v) & 0xF };
+                tick = false;
+            } else {
+                v = 0x10u8.wrapping_sub(v) & 0xF;
+            }
+        }
+        if tick {
+            v = if new & 8 != 0 { v + 1 } else { v.wrapping_sub(1) } & 0xF;
+        } else if new & 7 == 0 && self.clock {
+            self.set_clock(false, false);
+        }
+        self.volume = v;
     }
     /// NRx2 written while the channel plays ("zombie mode"): the volume is bumped depending on the old value.
     fn zombie_write(&mut self, old: u8, new: u8, cgb: bool) {
+        if cgb {
+            self.cgb_glitch(new, old);
+            return;
+        }
         let mut v = self.volume as i32;
         let invert = (old ^ new) & 8 != 0;
         if cgb {
@@ -397,7 +474,23 @@ impl Apu {
         if step == 2 || step == 6 {
             self.clock_sweep();
         }
-        if step == 7 {
+        if self.cgb {
+            let (r1, r2, r4) = (self.regs[0x02], self.regs[0x07], self.regs[0x11]);
+            if step == 6 {
+                self.ch1.env.cgb_countdown();
+                self.ch2.env.cgb_countdown();
+                self.ch4_env.cgb_countdown();
+            }
+            if self.ch1.env.clock {
+                self.ch1.env.cgb_tick(r1);
+            }
+            if self.ch2.env.clock {
+                self.ch2.env.cgb_tick(r2);
+            }
+            if self.ch4_env.clock {
+                self.ch4_env.cgb_tick(r4);
+            }
+        } else if step == 7 {
             let (r1, r2, r4) = (self.regs[0x02], self.regs[0x07], self.regs[0x11]);
             if self.ch1.enabled {
                 self.ch1.env.clock(r1);
@@ -408,6 +501,24 @@ impl Apu {
             if self.ch4_enabled {
                 self.ch4_env.clock(r4);
             }
+        }
+        self.update_levels();
+    }
+
+    /// Half-period event of the frame sequencer (rising edge of the DIV bit); the bus calls it on CGB.
+    pub fn frame_sequencer_half(&mut self) {
+        if !self.power || !self.cgb {
+            return;
+        }
+        let (r1, r2, r4) = (self.regs[0x02], self.regs[0x07], self.regs[0x11]);
+        if self.ch1.enabled {
+            self.ch1.env.cgb_reload(r1);
+        }
+        if self.ch2.enabled {
+            self.ch2.env.cgb_reload(r2);
+        }
+        if self.ch4_enabled {
+            self.ch4_env.cgb_reload(r4);
         }
         self.update_levels();
     }
