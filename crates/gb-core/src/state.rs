@@ -12,7 +12,7 @@ use std::vec::Vec;
 
 const MAGIC: &[u8; 4] = b"GBST";
 /// Bump whenever the serialized layout of any core struct changes.
-pub const STATE_VERSION: u32 = 7;
+pub const STATE_VERSION: u32 = 8;
 const HEADER_LEN: usize = 4 + 4 + 1 + 2 + 4 + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

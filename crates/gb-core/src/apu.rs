@@ -261,6 +261,16 @@ pub struct Apu {
     ch4_len: u16,
     ch4_env: Envelope,
     ch4_lfsr: u16,
+    // CGB noise: the 14-bit counter runs freely (even with the channel off) once started; the LFSR steps when
+    // the counter bit selected by NR43 rises. `nc_cd` is the T-cycle countdown to the next increment.
+    nc: u16,
+    nc_cd: u32,
+    nc_stamp: u64,
+    nc_last_inc: u64,
+    nc_active: bool,
+    nc_bg: bool,
+    nc_dac_off_start: bool,
+    nc_did_step: bool,
 
     /// Free-running T-cycle counter, used for wave RAM access timing.
     cycles: u64,
@@ -311,6 +321,14 @@ impl Apu {
             ch4_len: 0,
             ch4_env: Envelope::default(),
             ch4_lfsr: 0x7FFF,
+            nc: 0,
+            nc_cd: 0,
+            nc_stamp: 0,
+            nc_last_inc: u64::MAX,
+            nc_active: false,
+            nc_bg: false,
+            nc_dac_off_start: false,
+            nc_did_step: false,
             cycles: 0,
             ch3_last_read: 0,
             level_l: 0.0,
@@ -349,8 +367,9 @@ impl Apu {
         // A disabled square channel's frequency timer is frozen (its duty position is kept).
         let t1 = if self.ch1.enabled { self.ch1.timer } else { NEVER };
         let t2 = if self.ch2.enabled { self.ch2.timer } else { NEVER };
+        let t4 = if self.ch4_enabled { self.ch4_timer } else { NEVER };
         // Fast path: no channel event and no output sample is due within this call.
-        if t_cycles < self.until_sample && t_cycles < t1.min(t2).min(self.ch3_timer).min(self.ch4_timer) {
+        if t_cycles < self.until_sample && t_cycles < t1.min(t2).min(self.ch3_timer).min(t4) {
             self.cycles += t_cycles as u64;
             self.phase += rate * t_cycles as u64;
             self.until_sample -= t_cycles;
@@ -363,7 +382,7 @@ impl Apu {
             if self.ch3_timer != NEVER {
                 self.ch3_timer -= t_cycles;
             }
-            if self.ch4_timer != NEVER {
+            if t4 != NEVER {
                 self.ch4_timer -= t_cycles;
             }
             return;
@@ -376,7 +395,7 @@ impl Apu {
                 .min(if run1 { self.ch1.timer } else { NEVER })
                 .min(if run2 { self.ch2.timer } else { NEVER })
                 .min(self.ch3_timer)
-                .min(self.ch4_timer);
+                .min(if self.ch4_enabled { self.ch4_timer } else { NEVER });
 
             self.phase += rate * chunk as u64;
             self.until_sample -= chunk;
@@ -412,11 +431,15 @@ impl Apu {
                     changed = true;
                 }
             }
-            if self.ch4_timer != NEVER {
+            if self.ch4_enabled && self.ch4_timer != NEVER {
                 self.ch4_timer -= chunk;
                 if self.ch4_timer == 0 {
-                    self.ch4_timer = self.noise_period();
-                    self.clock_lfsr();
+                    if self.cgb {
+                        self.noise_event();
+                    } else {
+                        self.ch4_timer = self.noise_period();
+                        self.clock_lfsr();
+                    }
                     changed = true;
                 }
             }
@@ -640,6 +663,131 @@ impl Apu {
         div << (nr43 >> 4)
     }
 
+    /// T-cycles between increments of the CGB noise counter.
+    fn noise_div(&self) -> u32 {
+        match self.regs[0x12] & 7 {
+            0 => 4,
+            r => r as u32 * 8,
+        }
+    }
+
+    /// Bring the free-running counter up to the present cycle (the LFSR is not touched).
+    fn noise_sync(&mut self) {
+        let now = self.cycles;
+        let mut el = now.wrapping_sub(self.nc_stamp) as u32;
+        self.nc_stamp = now;
+        if !(self.nc_active || self.nc_bg) {
+            return;
+        }
+        let d = self.noise_div();
+        if self.nc_cd == 0 {
+            self.nc_cd = d;
+        }
+        if el < self.nc_cd {
+            self.nc_cd -= el;
+            return;
+        }
+        el -= self.nc_cd;
+        let n = 1 + el / d;
+        self.nc = self.nc.wrapping_add(n as u16) & 0x3FFF;
+        self.nc_last_inc = now - (el % d) as u64;
+        self.nc_cd = d - el % d;
+        self.nc_did_step = true;
+    }
+
+    /// T-cycles until the counter bit selected by NR43's shift next rises (NEVER if the LFSR cannot step).
+    fn noise_next(&self) -> u32 {
+        let s = self.regs[0x12] >> 4;
+        if s >= 14 || !(self.nc_active || self.nc_bg) {
+            return NEVER;
+        }
+        let m = 1u32 << s;
+        let mut j = (m + 2 * m - (self.nc as u32 & (2 * m - 1))) & (2 * m - 1);
+        if j == 0 {
+            j = 2 * m;
+        }
+        self.nc_cd.max(1) + (j - 1) * self.noise_div()
+    }
+
+    /// The counter bit just rose: step the LFSR and schedule the next step.
+    fn noise_event(&mut self) {
+        self.noise_sync();
+        self.clock_lfsr();
+        self.ch4_timer = self.noise_next();
+    }
+
+    /// NR44 trigger on CGB: restart the countdown depending on the alignment of the channel clock.
+    fn noise_trigger(&mut self) {
+        self.noise_sync();
+        let nr43 = self.regs[0x12];
+        let mut r = (nr43 & 7) as i32;
+        let a = (self.cycles.wrapping_sub(self.power_on_at) / 2) as u32;
+        let dac = self.regs[0x11] & 0xF8 != 0;
+        let was_dac_off_start = self.nc_dac_off_start;
+        self.nc_dac_off_start = !dac;
+        self.nc_active = dac;
+        let was_bg = self.nc_bg;
+        self.nc_bg = true;
+        let active = self.ch4_enabled;
+        let (mut instant, mut div1) = (false, false);
+        let cd = (self.nc_cd / 2) as i32;
+        let mask = 1u16 << (nr43 >> 4).min(15);
+        if r > 1 && cd == 1 {
+            self.nc = (self.nc + 1) & 0x3FFF;
+        } else if cd == 2 && a & 3 == 0 && active {
+            if r == 0 {
+                r = 8;
+            } else if r == 1 {
+                div1 = !self.nc_did_step;
+                let old = self.nc & mask != 0;
+                self.nc = (self.nc + 1) & 0x3FFF;
+                instant = !old && self.nc & mask != 0;
+            }
+        }
+        let mut c = if r == 0 { 6 } else { r * 4 + 6 };
+        if a & 1 != 0 {
+            if r == 0 {
+                c += if was_bg { -1 } else { 1 };
+            } else if a & 2 != 0 {
+                c += if r == 1 && !active { 1 } else { -3 };
+            } else {
+                c -= 1;
+                if r == 1 && active {
+                    c -= 4;
+                }
+            }
+        } else if r != 0 {
+            if a & 2 != 0 {
+                c -= 2;
+            } else if r > 1 || (r == 1 && active && nr43 & 0xF0 == 0) {
+                c -= 4;
+            }
+        }
+        if r > 1 {
+            if !dac && a & 3 == 0 {
+                c += 4;
+            }
+        } else if was_bg && !active && a & 3 == 0 {
+            if r == 0 {
+                if was_dac_off_start {
+                    c += 28;
+                }
+            } else {
+                c -= 4;
+            }
+        }
+        if div1 {
+            c -= 4;
+        }
+        self.nc_cd = (c.max(1) as u32) * 2;
+        self.nc_stamp = self.cycles;
+        self.ch4_lfsr = if r == 0 && active && a & 3 == 3 { 0x7FAA } else { 0x7FFF };
+        self.nc_did_step = a & 3 == 2;
+        if instant {
+            self.clock_lfsr();
+        }
+    }
+
     fn clock_lfsr(&mut self) {
         let nr43 = self.regs[0x12];
         if nr43 >> 4 >= 14 {
@@ -853,6 +1001,17 @@ impl Apu {
                     0x11 if self.ch4_enabled => self.ch4_env.zombie_write(old, val, self.cgb),
                     _ => {}
                 }
+                if i == 0x11 && self.cgb && val & 0xF8 == 0 {
+                    // DAC off: the counter stops counting in the background (after a last increment if one is due).
+                    self.noise_sync();
+                    if self.ch4_enabled && self.regs[0x12] & 7 != 0 {
+                        if self.nc_cd / 2 <= 2 {
+                            self.nc = (self.nc + 1) & 0x3FFF;
+                        }
+                        self.nc_bg = false;
+                    }
+                    self.nc_active = false;
+                }
                 self.regs[i] = val;
                 if val & 0xF8 == 0 {
                     match i {
@@ -902,6 +1061,7 @@ impl Apu {
                     }
                 }
             }
+            0x12 if self.cgb => self.write_nr43(val),
             _ => {
                 if i < 0x17 {
                     self.regs[i] = val;
@@ -909,6 +1069,25 @@ impl Apu {
             }
         }
         self.update_levels();
+    }
+
+    fn write_nr43(&mut self, val: u8) {
+        self.noise_sync();
+        let on = self.nc_active || self.nc_bg;
+        if on && self.nc_last_inc == self.cycles {
+            // The counter reloaded this very cycle: the new divisor applies to the reload, depending on alignment.
+            let a = (self.cycles.wrapping_sub(self.power_on_at) / 2) as usize;
+            let d = match val & 7 {
+                0 => 2,
+                r => r as u32 * 4,
+            };
+            let extra = if d == 2 { 0 } else { [2, 1, 0, 3][a & 3] };
+            self.nc_cd = (d + extra) * 2;
+        }
+        self.regs[0x12] = val;
+        if self.ch4_enabled {
+            self.ch4_timer = self.noise_next();
+        }
     }
 
     fn write_nr52(&mut self, val: u8) {
@@ -936,6 +1115,13 @@ impl Apu {
             self.ch2.timer = NEVER;
             self.ch3_timer = NEVER;
             self.ch4_timer = NEVER;
+            self.nc = 0;
+            self.nc_cd = 0;
+            self.nc_active = false;
+            self.nc_bg = false;
+            self.nc_dac_off_start = false;
+            self.nc_did_step = false;
+            self.nc_last_inc = u64::MAX;
             self.ch1.env = Envelope::default();
             self.ch2.env = Envelope::default();
             self.ch4_env = Envelope::default();
@@ -1034,10 +1220,16 @@ impl Apu {
                 self.ch4_len -= 1;
             }
         }
-        self.ch4_timer = self.noise_period();
         self.ch4_env.trigger(self.regs[0x11]);
-        self.ch4_lfsr = 0x7FFF;
-        self.ch4_enabled = dac;
+        if self.cgb {
+            self.noise_trigger();
+            self.ch4_enabled = dac;
+            self.ch4_timer = self.noise_next();
+        } else {
+            self.ch4_timer = self.noise_period();
+            self.ch4_lfsr = 0x7FFF;
+            self.ch4_enabled = dac;
+        }
     }
 
     // ------------------------------------------------------------------ misc
