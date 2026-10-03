@@ -1,6 +1,7 @@
 //! Joypad (P1, 0xFF00).
 
 use crate::irq;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Button {
@@ -14,6 +15,7 @@ pub enum Button {
     Start,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Joypad {
     /// P1 bits 4-5 (0 = group selected).
     select: u8,

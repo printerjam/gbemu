@@ -6,6 +6,7 @@
 
 use crate::irq;
 use crate::{SCREEN_HEIGHT, SCREEN_WIDTH};
+use serde::{Deserialize, Serialize};
 
 const DOTS_PER_LINE: u16 = 456;
 const LINES: u8 = 154;
@@ -31,7 +32,7 @@ const WX: usize = 11;
 
 pub const DEFAULT_PALETTE: [u32; 4] = [0x00FF_FFFF, 0x00AA_AAAA, 0x0055_5555, 0x0000_0000];
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
 struct Sprite {
     y: u8,
     x: u8,
@@ -39,12 +40,21 @@ struct Sprite {
     flags: u8,
 }
 
+fn default_palette() -> [u32; 4] {
+    DEFAULT_PALETTE
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Ppu {
+    #[serde(with = "crate::state::boxed_bytes")]
     vram: Box<[u8; 0x2000]>,
+    #[serde(with = "crate::state::bytes")]
     oam: [u8; 0xA0],
     regs: [u8; 12],
     framebuffer: Vec<u32>,
     frame_ready: bool,
+    /// Host display setting, not machine state (kept across state loads).
+    #[serde(skip, default = "default_palette")]
     palette: [u32; 4],
 
     /// Current line (raw; LY register applies the line-153 quirk).
@@ -121,6 +131,10 @@ impl Ppu {
 
     /// Replace the four output shades (index = DMG color 0..3). Default is
     /// exact grayscale; affects only lines rendered afterwards.
+    pub fn palette(&self) -> [u32; 4] {
+        self.palette
+    }
+
     pub fn set_palette(&mut self, palette: [u32; 4]) {
         self.palette = palette;
     }

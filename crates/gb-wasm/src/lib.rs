@@ -125,6 +125,18 @@ impl Emulator {
         self.gb.cartridge_mut().load_save_data_at(data, now_secs as u64);
     }
 
+    /// Snapshot of the complete machine (see `GameBoy::save_state`).
+    pub fn save_state(&self) -> Vec<u8> {
+        self.gb.save_state()
+    }
+
+    /// Restore a snapshot from the same ROM. Throws on mismatch/corruption and leaves the machine untouched.
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), JsError> {
+        self.gb.load_state(data).map_err(|e| JsError::new(&e.to_string()))?;
+        self.convert_frame();
+        Ok(())
+    }
+
     /// Bytes sent over the serial port so far (handy for blargg-style test ROMs in the browser).
     pub fn serial_output(&self) -> String {
         String::from_utf8_lossy(self.gb.serial_output()).into_owned()
@@ -176,6 +188,16 @@ mod tests {
         assert_eq!(&e.rgba[..3], &[0x9B, 0xBC, 0x0F]);
         e.set_palette(99);
         assert_eq!(e.palette, 2);
+    }
+
+    #[test]
+    fn state_roundtrip_through_wrapper() {
+        let mut e = Emulator::new(&rom()).ok().unwrap();
+        e.run_frame();
+        let st = e.save_state();
+        e.run_frame();
+        assert!(e.load_state(&st).is_ok());
+        assert_eq!(e.save_state(), st);
     }
 
     #[test]
