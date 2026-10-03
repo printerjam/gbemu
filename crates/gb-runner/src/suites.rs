@@ -53,6 +53,10 @@ pub const SUITES: &[SuiteInfo] = &[
         scored: true,
     },
     SuiteInfo {
+        name: "cgb-extra",
+        scored: false,
+    },
+    SuiteInfo {
         name: "blargg-extra",
         scored: false,
     },
@@ -295,6 +299,41 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
             Detect::Blargg { reference: None },
             margin(3.0),
         );
+    }
+
+    // cgb-extra (not scored): CGB APU and the SameSuite CGB tests
+    let mut cgb_extra = |name: String, rom: PathBuf, detect: Detect, seconds: f64| {
+        if rom.is_file() {
+            cases.push(TestCase {
+                suite: "cgb-extra",
+                name,
+                rom,
+                detect,
+                seconds,
+                model: Some(Model::Cgb),
+            });
+        }
+    };
+    let hell = roms.join("cgb-acid-hell");
+    cgb_extra(
+        "cgb-acid-hell".into(),
+        hell.join("cgb-acid-hell.gbc"),
+        Detect::Acid2 {
+            reference: hell.join("cgb-acid-hell.png"),
+        },
+        10.0,
+    );
+    for p in walk_gb(&b.join("cgb_sound/rom_singles")) {
+        cgb_extra(rel_name(&b, &p), p, Detect::Blargg { reference: None }, 15.0);
+    }
+    let cs = b.join("cgb_sound/cgb_sound.gb");
+    let reference = Some(cs.with_file_name("cgb_sound-cgb.png"));
+    cgb_extra(rel_name(&b, &cs), cs, Detect::Blargg { reference }, margin(36.0));
+    let same = roms.join("same-suite");
+    for dir in ["dma", "ppu", "interrupt"] {
+        for p in walk_gb(&same.join(dir)) {
+            cgb_extra(format!("same-suite/{}", rel_name(&same, &p)), p, Detect::Mooneye, 10.0);
+        }
     }
     cases
 }
