@@ -57,6 +57,7 @@ turtle 2/2, little-things 1/2, bully 0/1, strikethrough 0/1, mooneye-cgb 3/9.
   boundary (`CpuBus::instruction_boundary`); sources in VRAM / 0xE000+ read 0xFF; the destination counter is 16 bits wide and a
   transfer stops at its end. Remaining `hdma_start_2`/`hdma_late_*_2` boundary pairs want the block ~1 M-cycle earlier
   than our HBlank start: PPU mode-0 timing, not bus logic.
+- HALT and HBlank DMA (`Bus::halt_changed`, gambatte haltHdmaState): blocks do not run while halted; on wake-up one runs if it was requested at HALT entry or an HBlank began during the halt. Net 0 on the scoreboard (swaps hdma_m3halt_m1unhalt_hdma5, late_m3halt_m2unhalt_*_1 and *_ly_*_6 in, boundary `_2`/`_5` partners out): the `_2` partners want the m0 request ~1 M-cycle earlier (PPU side).
 
 ## Log
 
