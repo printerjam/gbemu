@@ -449,6 +449,9 @@ impl Apu {
     /// Time to the first duty step after a trigger: the period plus two ticks, rounded up to the next edge of
     /// the 1 MHz channel clock (matters in double speed, where a CPU cycle is only 2 T).
     fn square_start(&self, base: usize, active: bool) -> u32 {
+        if !self.cgb {
+            return self.square_period(base);
+        }
         let t = self.square_period(base) + if active { 4 } else { 8 };
         t + (4 - ((self.cycles.wrapping_sub(self.power_on_at) as u32 + t) & 3)) % 4
     }
@@ -500,7 +503,15 @@ impl Apu {
 
     /// Current 4-bit digital output of each channel (before the DAC), as exposed by PCM12/PCM34.
     fn digital(&self) -> [u8; 4] {
-        let sq = |c: &Square| if c.enabled { c.out * c.env.volume } else { 0 };
+        let cgb = self.cgb;
+        let sq = |c: &Square, nrx1: u8| {
+            let bit = if cgb { c.out } else { DUTY[(nrx1 >> 6) as usize][c.pos as usize] };
+            if c.enabled {
+                bit * c.env.volume
+            } else {
+                0
+            }
+        };
         let d3 = if self.ch3_enabled {
             match (self.regs[0x0C] >> 5) & 3 {
                 0 => 0,
@@ -516,7 +527,7 @@ impl Apu {
         } else {
             0
         };
-        [sq(&self.ch1), sq(&self.ch2), d3, d4]
+        [sq(&self.ch1, self.regs[0x01]), sq(&self.ch2, self.regs[0x06]), d3, d4]
     }
 
     /// CGB PCM12 (0xFF76): channel 1 in the low nibble, channel 2 in the high nibble.
