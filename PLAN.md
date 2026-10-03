@@ -50,13 +50,16 @@ mooneye timing tests check.
   `run_frame`, `framebuffer`, `set_button`, `registers`, `cycles`,
   `serial_output`, `set_sample_rate`, `drain_audio`, `cartridge(_mut)`.
 - Save states (`state.rs`): `GameBoy::save_state() -> Vec<u8>` /
-  `load_state(&[u8]) -> Result<(), StateError>` (postcard payload behind a
+  `load_state(&[u8]) -> Result<(), StateError>` (bincode payload behind a
   `GBST` header: version, ROM header+global checksum, ROM length, CRC-32).
   **Every stateful core struct derives `Serialize`/`Deserialize`; new fields
   must be serializable** (arrays > 32 bytes use `#[serde(with =
   "crate::state::bytes")]` / `boxed_bytes`; ROM bytes and host settings such as
   the DMG palette and audio sample rate are `serde(skip)` and restored from the
   running machine). Bump `STATE_VERSION` whenever the layout changes.
+- Rewind (`rewind.rs`): `Rewind::{frame(&gb), push, pop_into(&mut gb), clear, len}` keeps a bounded ring of
+  snapshots (newest in full, older ones as XOR + zero-run-length deltas of the raw bincode payload; the payload
+  uses fixed-width integers precisely so consecutive snapshots stay byte-aligned). About 0.5 KB and 40 us per snapshot.
 - No boot ROM: machine starts in documented DMG-ABC post-boot state
   (A=01 F=B0 BC=0013 DE=00D8 HL=014D SP=FFFE PC=0100, DIV counter 0xABCC).
 - DMG palette in framebuffer is exactly FFFFFF/AAAAAA/555555/000000 so
