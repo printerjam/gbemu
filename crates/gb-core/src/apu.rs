@@ -227,6 +227,9 @@ struct Square {
     pos: u8,
     /// Duty output bit latched when the position last advanced (duty changes apply from the next step).
     out: u8,
+    /// `cycles` of the last duty step, and whether any step happened since the last trigger.
+    last_step: u64,
+    did_tick: bool,
     len: u16,
     env: Envelope,
     // sweep (channel 1 only)
@@ -243,6 +246,8 @@ impl Square {
             timer: NEVER,
             pos: 0,
             out: 0,
+            last_step: u64::MAX,
+            did_tick: false,
             len: 0,
             env: Envelope::default(),
             shadow: 0,
@@ -455,6 +460,8 @@ impl Apu {
                 if self.ch1.timer == 0 {
                     self.ch1.timer = self.square_period(0);
                     self.ch1.pos = (self.ch1.pos + 1) & 7;
+                    self.ch1.last_step = self.cycles;
+                    self.ch1.did_tick = true;
                     self.ch1.out = DUTY[(self.regs[0x01] >> 6) as usize][self.ch1.pos as usize];
                     changed = true;
                 }
@@ -464,6 +471,8 @@ impl Apu {
                 if self.ch2.timer == 0 {
                     self.ch2.timer = self.square_period(5);
                     self.ch2.pos = (self.ch2.pos + 1) & 7;
+                    self.ch2.last_step = self.cycles;
+                    self.ch2.did_tick = true;
                     self.ch2.out = DUTY[(self.regs[0x06] >> 6) as usize][self.ch2.pos as usize];
                     changed = true;
                 }
@@ -1151,7 +1160,6 @@ impl Apu {
             }
             return;
         }
-        let odd = self.fs_odd();
         match i {
             0x00 if self.cgb => self.sw_write_nr10(val),
             0x00 => {
@@ -1211,39 +1219,42 @@ impl Apu {
                     self.ch3_sample = 0;
                 }
             }
-            0x04 | 0x09 | 0x0E | 0x13 => {
-                let was = self.regs[i] & 0x40 != 0;
+            0x03 | 0x08 if self.cgb => {
+                let ch = if i == 0x03 { &self.ch1 } else { &self.ch2 };
+                let reloaded = ch.enabled && ch.last_step == self.cycles;
                 self.regs[i] = val;
-                let now = val & 0x40 != 0;
-                let trigger = val & 0x80 != 0;
-                if !was && now && odd {
-                    let len = match i {
-                        0x04 => &mut self.ch1.len,
-                        0x09 => &mut self.ch2.len,
-                        0x0E => &mut self.ch3_len,
-                        _ => &mut self.ch4_len,
-                    };
-                    if *len > 0 {
-                        *len -= 1;
-                        if *len == 0 && !trigger {
-                            match i {
-                                0x04 => self.ch1.enabled = false,
-                                0x09 => self.ch2.enabled = false,
-                                0x0E => self.ch3_enabled = false,
-                                _ => self.ch4_enabled = false,
-                            }
-                        }
-                    }
-                }
-                if trigger {
-                    match i {
-                        0x04 => self.trigger_ch1(),
-                        0x09 => self.trigger_ch2(),
-                        0x0E => self.trigger_ch3(),
-                        _ => self.trigger_ch4(),
-                    }
+                if reloaded {
+                    // The countdown has only just reloaded: it picks up the new frequency immediately.
+                    let t = self.square_period(i - 3);
+                    let ch = if i == 0x03 { &mut self.ch1 } else { &mut self.ch2 };
+                    ch.timer = t;
                 }
             }
+            0x04 | 0x09 if self.cgb => {
+                let base = i - 4;
+                let (enabled, did_tick, timer, last_step) = {
+                    let ch = if i == 0x04 { &self.ch1 } else { &self.ch2 };
+                    (ch.enabled, ch.did_tick, ch.timer, ch.last_step)
+                };
+                let old_hi = self.regs[i] & 7;
+                let old_len = self.regs[i - 1] as u32 | (old_hi as u32) << 8;
+                if val & 0x80 == 0 && enabled && old_hi == 7 && val & 7 != 7 {
+                    // A frequency drop from >= $700 right around a step must not change the current sample.
+                    let x = (timer / 2).wrapping_sub(1);
+                    if did_tick && x >> 1 == old_len ^ 0x7FF {
+                        let ch = if i == 0x04 { &mut self.ch1 } else { &mut self.ch2 };
+                        ch.pos = ch.pos.wrapping_sub(1) & 7;
+                    }
+                }
+                let reloaded = enabled && last_step == self.cycles;
+                self.write_nrx4(i, val);
+                if reloaded && val & 0x80 == 0 {
+                    let t = self.square_period(base);
+                    let ch = if i == 0x04 { &mut self.ch1 } else { &mut self.ch2 };
+                    ch.timer = t;
+                }
+            }
+            0x04 | 0x09 | 0x0E | 0x13 => self.write_nrx4(i, val),
             0x12 if self.cgb => self.write_nr43(val),
             _ => {
                 if i < 0x17 {
@@ -1252,6 +1263,42 @@ impl Apu {
             }
         }
         self.update_levels();
+    }
+
+    /// NRx4 writes: length enable (with the extra clock quirk) and trigger.
+    fn write_nrx4(&mut self, i: usize, val: u8) {
+        let odd = self.fs_odd();
+        let was = self.regs[i] & 0x40 != 0;
+        self.regs[i] = val;
+        let now = val & 0x40 != 0;
+        let trigger = val & 0x80 != 0;
+        if !was && now && odd {
+            let len = match i {
+                0x04 => &mut self.ch1.len,
+                0x09 => &mut self.ch2.len,
+                0x0E => &mut self.ch3_len,
+                _ => &mut self.ch4_len,
+            };
+            if *len > 0 {
+                *len -= 1;
+                if *len == 0 && !trigger {
+                    match i {
+                        0x04 => self.ch1.enabled = false,
+                        0x09 => self.ch2.enabled = false,
+                        0x0E => self.ch3_enabled = false,
+                        _ => self.ch4_enabled = false,
+                    }
+                }
+            }
+        }
+        if trigger {
+            match i {
+                0x04 => self.trigger_ch1(),
+                0x09 => self.trigger_ch2(),
+                0x0E => self.trigger_ch3(),
+                _ => self.trigger_ch4(),
+            }
+        }
     }
 
     fn write_nr43(&mut self, val: u8) {
@@ -1672,5 +1719,41 @@ mod tests {
         assert_eq!(a.ch2.env.volume, 5);
         a.write(0xFF17, 0x41); // add -> subtract inverts: 16 - 5
         assert_eq!(a.ch2.env.volume, 11);
+    }
+
+    #[test]
+    fn cgb_sweep_overflow_check_is_delayed_after_trigger() {
+        let mut a = Apu::new();
+        a.set_cgb(true);
+        a.write(0xFF26, 0x00);
+        a.write(0xFF26, 0x80);
+        a.write(0xFF12, 0xF0);
+        a.write(0xFF10, 0x01); // shift 1
+        a.write(0xFF13, 0xFF);
+        a.write(0xFF14, 0x87); // 0x7FF + 0x3FF overflows
+        assert_eq!(a.read(0xFF26) & 1, 1, "still on right after the trigger");
+        for _ in 0..8 {
+            a.tick(4);
+        }
+        assert_eq!(a.read(0xFF26) & 1, 0, "overflow detected a few 1 MHz ticks later");
+    }
+
+    #[test]
+    fn cgb_noise_counter_free_runs_between_triggers() {
+        let mut a = Apu::new();
+        a.set_cgb(true);
+        a.write(0xFF26, 0x00);
+        a.write(0xFF26, 0x80);
+        a.write(0xFF21, 0xF0);
+        a.write(0xFF22, 0x00); // divisor 0 keeps the background counter running
+        a.write(0xFF23, 0x80);
+        a.write(0xFF21, 0x00); // DAC off: channel stops
+        let before = a.nc;
+        for _ in 0..100 {
+            a.tick(4);
+        }
+        a.noise_sync();
+        assert_eq!(a.read(0xFF26) & 8, 0);
+        assert_ne!(a.nc, before, "counter keeps counting in the background");
     }
 }
