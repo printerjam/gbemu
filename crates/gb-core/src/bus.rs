@@ -464,9 +464,7 @@ impl CpuBus for Bus {
         if self.dma_conflict(addr).is_some() {
             // The DMA latches what the two bus drivers produce: the CPU's data, wired-ANDed with the source
             // byte when that comes from DMG WRAM; CGB WRAM sources are not disturbed at all.
-            if !self.cgb {
-                self.dma.forced = Some(val);
-            } else if self.dma.active.is_some_and(|(i, base)| base + (i as u16) < 0xC000) {
+            if !self.cgb || self.dma.active.is_some_and(|(i, base)| base + (i as u16) < 0xC000) {
                 self.dma.forced = Some(val);
             }
         } else {
