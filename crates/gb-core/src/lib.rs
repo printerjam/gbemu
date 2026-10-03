@@ -4,6 +4,7 @@
 pub mod apu;
 pub mod bus;
 pub mod cartridge;
+pub mod cheats;
 pub mod cpu;
 pub mod disasm;
 pub mod gameboy;
@@ -16,6 +17,7 @@ pub mod state;
 pub mod timer;
 
 pub use cartridge::{CartError, Cartridge};
+pub use cheats::{Cheat, CheatError};
 pub use gameboy::GameBoy;
 pub use joypad::Button;
 pub use rewind::Rewind;

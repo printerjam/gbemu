@@ -99,6 +99,7 @@ impl GameBoy {
         if new.bus.apu.sample_rate() != self.bus.apu.sample_rate() {
             new.bus.apu.set_sample_rate(self.bus.apu.sample_rate());
         }
+        new.bus.cheats = std::mem::take(&mut self.bus.cheats);
         *self = new;
         Ok(())
     }

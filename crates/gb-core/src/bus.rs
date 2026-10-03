@@ -53,6 +53,9 @@ pub struct Bus {
     /// The divider has been written since power-on: from then on the model counter and the hardware counter agree,
     /// so the DMG serial-edge look-ahead no longer applies (gambatte serial/div_write_*).
     div_synced: bool,
+    /// Cheat codes: host setting, not machine state.
+    #[serde(skip)]
+    pub cheats: crate::cheats::Cheats,
     cgb: bool,
     double_speed: bool,
     /// KEY1 bit 0: speed switch armed for the next STOP.
@@ -112,6 +115,7 @@ impl Bus {
             wram: vec![0; 0x8000],
             svbk: 1,
             div_synced: false,
+            cheats: Default::default(),
             cgb,
             double_speed: false,
             key1_armed: false,
@@ -327,7 +331,14 @@ impl Bus {
     /// Side-effect-free read (no clock advance); also used by debuggers.
     pub fn peek(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x7FFF => self.cart.read_rom(addr),
+            0x0000..=0x7FFF => {
+                let v = self.cart.read_rom(addr);
+                if self.cheats.has_genie() {
+                    self.cheats.patch_rom(addr, v)
+                } else {
+                    v
+                }
+            }
             0x8000..=0x9FFF => self.ppu.read_vram(addr),
             0xA000..=0xBFFF => self.cart.read_ram(addr),
             0xC000..=0xFDFF => self.wram[self.wram_index(addr)],
