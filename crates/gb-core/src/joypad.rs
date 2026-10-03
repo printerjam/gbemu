@@ -26,7 +26,7 @@ pub struct Joypad {
 impl Joypad {
     pub fn new() -> Self {
         Joypad {
-            select: 0x30,
+            select: 0x00,
             pressed: 0,
         }
     }

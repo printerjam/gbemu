@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod disasm;
 pub mod gameboy;
 pub mod joypad;
+pub mod oam_bug;
 pub mod ppu;
 pub mod rewind;
 pub mod serial;

@@ -5,6 +5,7 @@ use crate::apu::Apu;
 use crate::cartridge::Cartridge;
 use crate::cpu::CpuBus;
 use crate::joypad::Joypad;
+use crate::oam_bug;
 use crate::ppu::Ppu;
 use crate::serial::Serial;
 use crate::timer::Timer;
@@ -81,6 +82,7 @@ impl Bus {
         let mut bus = Self::with_ppu(cart, ppu, true);
         bus.timer = Timer::with_div(CGB_POST_BOOT_DIV);
         bus.apu.set_cgb(true);
+        bus.serial.set_cgb(true);
         bus
     }
 
@@ -148,7 +150,12 @@ impl Bus {
         let div_before = self.timer.div_counter();
         let mut irqs = self.timer.tick();
         self.frame_sequencer_edge(div_before);
-        irqs |= self.serial.tick();
+        // The divider as modelled here lags the hardware counter by one M-cycle on DMG (see Timer::new),
+        // so the serial clock edge is taken 4 T ahead (mooneye serial/boot_sclk_align).
+        let lag = if self.cgb { 0 } else { 4 };
+        irqs |= self
+            .serial
+            .clock(div_before.wrapping_add(lag), self.timer.div_counter().wrapping_add(lag));
         irqs |= self.ppu.tick(dots);
         self.apu.tick(dots);
         self.int_flag |= irqs;
@@ -363,6 +370,7 @@ impl Bus {
                 let before = self.timer.div_counter();
                 self.timer.write(addr, val);
                 self.frame_sequencer_edge(before);
+                self.int_flag |= self.serial.clock(before, self.timer.div_counter());
             }
             0xFF0F => self.int_flag = val & 0x1F,
             0xFF10..=0xFF3F => self.apu.write(addr, val),
@@ -383,15 +391,39 @@ impl Bus {
     }
 }
 
+impl Bus {
+    /// OAM corruption bug: `addr` is on the address bus (access or IDU) in this M-cycle.
+    fn oam_bug(&mut self, addr: u16, kind: oam_bug::Kind) {
+        if (0xFE00..0xFF00).contains(&addr) {
+            if let Some(row) = self.ppu.oam_scan_row() {
+                oam_bug::corrupt(self.ppu.oam_mut(), row, kind);
+            }
+        }
+    }
+}
+
 impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
         self.tick_m();
+        self.oam_bug(addr, oam_bug::Kind::Read);
+        self.peek(addr)
+    }
+
+    fn read_idu(&mut self, addr: u16) -> u8 {
+        self.tick_m();
+        self.oam_bug(addr, oam_bug::Kind::ReadInc);
         self.peek(addr)
     }
 
     fn write(&mut self, addr: u16, val: u8) {
         self.tick_m();
+        self.oam_bug(addr, oam_bug::Kind::Write);
         self.poke(addr, val);
+    }
+
+    fn tick_idu(&mut self, addr: u16) {
+        self.tick_m();
+        self.oam_bug(addr, oam_bug::Kind::Write);
     }
 
     fn tick(&mut self) {

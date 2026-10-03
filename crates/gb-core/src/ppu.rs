@@ -605,6 +605,20 @@ impl Ppu {
             self.vram[self.vbk as usize * 0x2000 + (addr & 0x1FFF) as usize] = val;
         }
     }
+    /// OAM row (0..20) the PPU is scanning at this M-cycle, while in mode 2. Used by the OAM
+    /// corruption bug.
+    pub fn oam_scan_row(&self) -> Option<usize> {
+        if !self.lcd_on() || self.first_line || self.ly >= 144 {
+            return None;
+        }
+        (self.dot < MODE3_START).then_some(self.dot as usize / 4)
+    }
+
+    /// Raw OAM for the corruption bug.
+    pub fn oam_mut(&mut self) -> &mut [u8; 0xA0] {
+        &mut self.oam
+    }
+
     /// `addr` in 0xFE00..=0xFE9F. CPU view (0xFF while blocked in modes 2/3).
     pub fn read_oam(&self, addr: u16) -> u8 {
         if self.oam_read_lock {
