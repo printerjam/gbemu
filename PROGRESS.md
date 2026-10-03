@@ -2,19 +2,21 @@
 
 ## Current state
 
+All milestone checks in this table were run against `main`.
+
 | # | Milestone | Status | Evidence |
 |---|---|---|---|
-| 1 | CPU passes cpu_instrs | DONE | blargg cpu_instrs 11/11 + combined (gbtest blargg 19/19); Gameboy Doctor logs match ROMs 1,3-11 (ROM 2: one-instruction IF-dispatch divergence under review) |
-| 2 | PPU passes dmg-acid2 | DONE | gbtest acid2 1/1 pixel-exact; mooneye ppu/ 12/12 |
+| 1 | CPU passes cpu_instrs | DONE | blargg cpu_instrs 11/11 + combined; Gameboy Doctor logs match |
+| 2 | PPU passes dmg-acid2 | DONE | acid2 pixel-exact; mooneye ppu/ 12/12 |
 | 3 | MBC1/2/3/5 | DONE | mooneye-mbc 28/28; mbc3 suite 4/4 (rtc3test x3, mbc3-tester incl. MBC30) |
-| 4 | Homebrew playable in window | verifying | Tobu Tobu Girl (MIT) reaches gameplay via scripted input on main; real-keyboard (xdotool) + battery round-trip pending |
-| 5 | APU | verified, marks after M4 | dmg_sound 13/13; Tobu WAV capture: peak 25453, no clipping, DC -5; desktop ring buffer fed, 59.7 fps audio pacing, no underruns |
-| 6 | Terminal renderer | verified render, marks after M4 | gbterm headless ANSI dump of dmg-acid2 decodes to 0 pixel diffs; interactive input check pending |
-| 7 | Save states | verified, marks after M4 | 7 state integration tests (determinism, wrong-ROM, corruption); script save/load smoke |
-| 8 | CGB | in progress | |
-| 9 | WASM | in progress | |
+| 4 | Homebrew playable in window | DONE | Tobu Tobu Girl (MIT): real X key events (XTEST) title→gameplay, P/Tab/R/Esc/F12, F1/Shift+F1 live state round-trip, battery .sav write+load proven by option byte change |
+| 5 | APU | DONE | dmg_sound 13/13; cgb_sound 13/13; Tobu WAV: peak 25453, no clipping, DC -5; desktop audio pacing 59.7 fps without underruns |
+| 6 | Terminal renderer | DONE | gbterm ANSI dump of dmg-acid2 decodes to 0 pixel diffs; tmux-driven key input reaches Tobu gameplay |
+| 7 | Save states | DONE | serde+bincode `GBST` v2; determinism/wrong-ROM/corruption tests (DMG+CGB); frontend hotkeys; rewind (≈500 B/snapshot) |
+| 8 | CGB | DONE | cgb suite 34/34 (cgb-acid2 pixel-exact, blargg on CGB, cgb_sound); geometrix/brickster render in colour |
+| 9 | WASM | verifying | `scripts/build-web.sh`; Chromium: acid2 0 diff, Tobu playable, 59.9 fps, audio worklet, localStorage saves; GitHub Pages deploy |
 
-## Scoreboard (`cargo run --release -p gb-runner -- --roms roms`)
+## Scoreboard (`scripts/scoreboard.sh`, guards against regressions vs `scoreboard-baseline.json`)
 
 | Suite | Passed | Total |
 |---|---|---|
@@ -22,36 +24,34 @@
 | mooneye | 64 | 66 |
 | mooneye-mbc | 28 | 28 |
 | acid2 | 1 | 1 |
+| cgb | 34 | 34 |
 | mbc3 | 4 | 4 |
 
-**SCORE: 116/118**
+**SCORE: 150/152** (wt/core has mooneye 66/66 + oam_bug 8/9 pending merge)
 
-Failing:
-| boot_hwio-dmgABCmgb | FAIL | regs B,C,D,E,H,L = 42 42 42 42 42 42 |
-| serial/boot_sclk_align-dmgABCmgb | FAIL | regs B,C,D,E,H,L = 42 42 42 42 42 42 |
-
-Unscored `blargg-extra`: 16/22 (dmg_sound 13/13, oam_bug 3/9).
+Unscored: blargg-extra 16/22 (oam_bug pending), cgb-extra 6/7 (cgb-acid-hell: 2 px, needs mid-scanline palette writes).
 
 ## Tools
 
-- `gbtest` scoreboard; `gbtest run <rom>`; `gbtest trace <rom> --doctor` + `scripts/doctor.sh N` (Gameboy Doctor logs in `out/doctor/`).
-- `gbemu <rom>` desktop (minifb+cpal); `gbterm <rom>` terminal; `gbdbg <rom>` debugger TUI (`--script` mode).
+- `gbtest` scoreboard / `run` / `trace --doctor`; `scripts/doctor.sh N`; `scripts/scoreboard.sh [--update]`.
+- `gbemu` desktop, `gbterm` terminal, `gbdbg` debugger TUI, `web/` browser build.
+- Published: https://github.com/printerjam/gbemu, Pages https://printerjam.github.io/gbemu/
 
 ## Notes / decisions
 
-- Timer post-boot internal divider is 0xABC8 (only value passing mooneye boot_div-dmgABCmgb under tick-then-access).
+- Timer post-boot divider 0xABC8 (DMG), 0x2674 (CGB) — calibrated to mooneye boot_div.
 - TAC write falling-edge check uses an empirical +8 T look-ahead (timer/rapid_toggle).
-- PPU is a scanline renderer with dot-accurate mode timing; pixel FIFO not started.
+- PPU: scanline renderer with dot-accurate mode timing; pixel FIFO not started (mealybug, cgb-acid-hell, age m3-* need it).
+- Toolchain: Homebrew rust for the workspace; rustup (~/.cargo, wasm32 target, rustfmt/clippy components) for the web build.
 - `roms/` is write-protected (it was wiped once mid-session; refetch with scripts/fetch-roms.sh).
 
 ## Log
 
 - 2026-10-02: skeleton + plan; test ROMs v7.0.
-- 2026-10-03: wave 1 merged (CPU, timer, PPU, MBCs, APU, runner, desktop, gbterm, disasm/trace). Score 112/114. EI;HALT dispatch fix (found by Tobu crash).
-
-- Later 2026-10-03: APU audio verified, debugger, save states (serde+postcard), MBC30, mbc3 suite. Score 116/118.
+- 2026-10-03: wave 1 merged (CPU, timer, PPU, MBCs, APU, runner, desktop, gbterm, disasm/trace). EI;HALT dispatch fix.
+- 2026-10-03: debugger, save states, rewind, MBC30, CGB, WASM + Pages, CI. Published to GitHub.
 
 ## Next
 
-- Fix dmg_sound 03-trigger regression; unused/boot hwio masks; serial clock alignment; oam_bug.
-- Verify gbterm and desktop keyboard/saves; save states; CGB; WASM.
+- Merge wt/core (mooneye 66/66, oam_bug, wilbertpol probe).
+- Accuracy: pixel FIFO (mealybug, cgb-acid-hell, age), wider suites (gbmicrotest, gambatte, same-suite, age) under measurement by the suite-coverage work.

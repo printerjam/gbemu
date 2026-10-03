@@ -1,7 +1,7 @@
-//! Save states: the whole machine encoded with postcard behind a small checked header.
+//! Save states: the whole machine encoded with bincode (fixed-width integers, so snapshots of a running machine keep their layout and delta-compress well; see `rewind`) behind a small checked header.
 //!
 //! Layout: `GBST` | version u32 LE | ROM header checksum (0x14D) u8 | ROM global checksum (0x14E-F) u16 LE |
-//! ROM length u32 LE | payload CRC-32 u32 LE | postcard payload.
+//! ROM length u32 LE | payload CRC-32 u32 LE | bincode payload.
 //!
 //! Every stateful core struct derives `Serialize`/`Deserialize`; new fields must be serializable.
 //! ROM bytes are never stored. Frontend settings (DMG palette, audio sample rate) survive a load.
@@ -12,7 +12,7 @@ use std::vec::Vec;
 
 const MAGIC: &[u8; 4] = b"GBST";
 /// Bump whenever the serialized layout of any core struct changes.
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 const HEADER_LEN: usize = 4 + 4 + 1 + 2 + 4 + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,14 +45,27 @@ impl fmt::Display for StateError {
 
 impl std::error::Error for StateError {}
 
-/// CRC-32 (IEEE), bitwise: save states are small and rare, no table needed.
+const CRC_TABLE: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+            k += 1;
+        }
+        t[i] = c;
+        i += 1;
+    }
+    t
+};
+
+/// CRC-32 (IEEE).
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xEDB8_8320 & (!(crc & 1)).wrapping_add(1));
-        }
+        crc = (crc >> 8) ^ CRC_TABLE[((crc ^ b as u32) & 0xFF) as usize];
     }
     !crc
 }
@@ -68,9 +81,31 @@ fn rom_identity(gb: &GameBoy) -> (u8, u16, u32) {
 }
 
 impl GameBoy {
+    /// Raw encoded machine state without header or checksum, for in-memory snapshots of this same machine
+    /// (rewind). Restore with [`GameBoy::restore_payload`].
+    pub(crate) fn snapshot_payload(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("serializing to a Vec cannot fail")
+    }
+
+    /// Restore a payload produced by [`GameBoy::snapshot_payload`] on this machine (same ROM). Host settings and
+    /// the ROM are kept. On error the machine is untouched.
+    pub(crate) fn restore_payload(&mut self, payload: &[u8]) -> Result<(), StateError> {
+        let mut new: GameBoy = bincode::deserialize(payload).map_err(|_| StateError::Decode)?;
+        if !new.bus.cart.adopt_rom_from(&mut self.bus.cart) {
+            return Err(StateError::Decode);
+        }
+        // Host settings are not machine state.
+        new.bus.ppu.set_palette(self.bus.ppu.palette());
+        if new.bus.apu.sample_rate() != self.bus.apu.sample_rate() {
+            new.bus.apu.set_sample_rate(self.bus.apu.sample_rate());
+        }
+        *self = new;
+        Ok(())
+    }
+
     /// Snapshot the complete machine state.
     pub fn save_state(&self) -> Vec<u8> {
-        let payload = postcard::to_allocvec(self).expect("serializing to a Vec cannot fail");
+        let payload = self.snapshot_payload();
         let (hdr, global, len) = rom_identity(self);
         let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
         out.extend_from_slice(MAGIC);
@@ -104,17 +139,7 @@ impl GameBoy {
         if crc32(payload) != u32_at(15) {
             return Err(StateError::Corrupt);
         }
-        let mut new: GameBoy = postcard::from_bytes(payload).map_err(|_| StateError::Decode)?;
-        if !new.bus.cart.adopt_rom_from(&mut self.bus.cart) {
-            return Err(StateError::Decode);
-        }
-        // Host settings are not machine state.
-        new.bus.ppu.set_palette(self.bus.ppu.palette());
-        if new.bus.apu.sample_rate() != self.bus.apu.sample_rate() {
-            new.bus.apu.set_sample_rate(self.bus.apu.sample_rate());
-        }
-        *self = new;
-        Ok(())
+        self.restore_payload(payload)
     }
 }
 

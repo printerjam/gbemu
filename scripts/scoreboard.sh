@@ -11,10 +11,10 @@ update=0
 if [ "${1:-}" = "--update" ]; then update=1; shift; fi
 
 cargo build --release -q -p gb-runner
-# Every runnable suite; the *-cgb suites and gbmicrotest-manual are list-only (see `gbtest --list`).
+# Every runnable suite; gbmicrotest-manual has no automatic verdict and is list-only.
 suites=()
 for s in blargg blargg-extra mooneye mooneye-mbc acid2 mbc3 gbmicrotest gambatte age same-suite mealybug \
-  scribbltests turtle-tests bully strikethrough little-things mooneye-wilbertpol mooneye-extra; do
+  scribbltests turtle-tests bully strikethrough little-things mooneye-wilbertpol mooneye-extra cgb cgb-extra gambatte-cgb age-cgb same-suite-cgb mealybug-cgb mooneye-cgb; do
   suites+=(--suite "$s")
 done
 if [ "${1:-}" = "--markdown" ]; then

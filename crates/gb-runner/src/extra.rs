@@ -1,9 +1,8 @@
 //! Unscored suites: every collection beyond the scored core set, with DMG model filtering.
-//! Suites ending in `-cgb` hold the CGB-only tests; they are listed but not run until the runner
-//! can select a CGB model.
+//! Suites ending in `-cgb` hold the CGB-only tests and run on the CGB model.
 
 use crate::suites::{mooneye_applies_to_dmg, walk, Detect, GambatteExpect, TestCase};
-use gb_core::Button;
+use gb_core::{Button, Model};
 use std::path::{Path, PathBuf};
 
 struct Ctx<'a> {
@@ -18,6 +17,11 @@ impl Ctx<'_> {
             rom,
             detect,
             seconds,
+            model: Some(if suite.ends_with("-cgb") {
+                Model::Cgb
+            } else {
+                Model::Dmg
+            }),
         });
     }
 }

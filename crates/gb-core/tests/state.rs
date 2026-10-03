@@ -1,5 +1,5 @@
 //! Save-state tests. ROM-driven ones are skipped when `roms/` is absent.
-use gb_core::{GameBoy, StateError};
+use gb_core::{GameBoy, Model, StateError};
 use std::path::PathBuf;
 
 fn rom(rel: &str) -> Option<Vec<u8>> {
@@ -38,7 +38,11 @@ fn run_frames(gb: &mut GameBoy, n: usize) {
 
 /// Run `n` frames, snapshot, run `m` more (A); restore into the same machine and into a fresh one, run `m` (B, C).
 fn check_determinism(rom_bytes: Vec<u8>, n: usize, m: usize) {
-    let mut gb = GameBoy::new(rom_bytes.clone()).unwrap();
+    check_determinism_model(rom_bytes, None, n, m);
+}
+
+fn check_determinism_model(rom_bytes: Vec<u8>, model: Option<Model>, n: usize, m: usize) {
+    let mut gb = GameBoy::with_model_choice(rom_bytes.clone(), model).unwrap();
     gb.set_sample_rate(44100);
     run_frames(&mut gb, n);
     let state = gb.save_state();
@@ -51,7 +55,7 @@ fn check_determinism(rom_bytes: Vec<u8>, n: usize, m: usize) {
     run_frames(&mut gb, m);
     assert_eq!(a, observe(&mut gb), "same machine after load_state");
 
-    let mut fresh = GameBoy::new(rom_bytes).unwrap();
+    let mut fresh = GameBoy::with_model_choice(rom_bytes, model).unwrap();
     fresh.set_sample_rate(44100);
     fresh.load_state(&state).unwrap();
     run_frames(&mut fresh, m);
@@ -62,6 +66,29 @@ fn check_determinism(rom_bytes: Vec<u8>, n: usize, m: usize) {
 fn deterministic_after_load_acid2() {
     let Some(r) = rom("dmg-acid2/dmg-acid2.gb") else { return };
     check_determinism(r, 20, 30);
+}
+
+#[test]
+fn deterministic_after_load_cgb_acid2() {
+    let Some(r) = rom("cgb-acid2/cgb-acid2.gbc") else {
+        return;
+    };
+    check_determinism(r, 20, 30);
+}
+
+#[test]
+fn deterministic_after_load_cgb_compat_mode() {
+    let Some(r) = rom("dmg-acid2/dmg-acid2.gb") else { return };
+    check_determinism_model(r, Some(Model::Cgb), 20, 30);
+}
+
+#[test]
+fn deterministic_after_load_cgb_hdma_and_banks() {
+    // SameSuite hdma_mode0 leaves HDMA, VRAM/WRAM banking and palette state in play.
+    let Some(r) = rom("same-suite/dma/hdma_mode0.gb") else {
+        return;
+    };
+    check_determinism(r, 3, 5);
 }
 
 #[test]

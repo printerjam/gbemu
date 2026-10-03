@@ -1,5 +1,6 @@
 //! Built-in manifest of test suites and ROM discovery.
 
+use gb_core::Model;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -42,13 +43,15 @@ pub struct TestCase {
     pub detect: Detect,
     /// Emulated time limit in seconds.
     pub seconds: f64,
+    /// Hardware to emulate; `None` = whatever the cartridge header asks for. DMG suites pin `Dmg`.
+    pub model: Option<Model>,
 }
 
 pub struct SuiteInfo {
     pub name: &'static str,
     /// Counts towards `SCORE:`.
     pub scored: bool,
-    /// `false` for suites that cannot run yet (need a CGB model, or have no automatic verdict): listed only.
+    /// `false` for suites that have no automatic verdict: listed only.
     pub runnable: bool,
 }
 
@@ -71,6 +74,16 @@ pub const SUITES: &[SuiteInfo] = &[
     SuiteInfo {
         name: "acid2",
         scored: true,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "cgb",
+        scored: true,
+        runnable: true,
+    },
+    SuiteInfo {
+        name: "cgb-extra",
+        scored: false,
         runnable: true,
     },
     SuiteInfo {
@@ -151,27 +164,27 @@ pub const SUITES: &[SuiteInfo] = &[
     SuiteInfo {
         name: "gambatte-cgb",
         scored: false,
-        runnable: false,
+        runnable: true,
     },
     SuiteInfo {
         name: "age-cgb",
         scored: false,
-        runnable: false,
+        runnable: true,
     },
     SuiteInfo {
         name: "same-suite-cgb",
         scored: false,
-        runnable: false,
+        runnable: true,
     },
     SuiteInfo {
         name: "mealybug-cgb",
         scored: false,
-        runnable: false,
+        runnable: true,
     },
     SuiteInfo {
         name: "mooneye-cgb",
         scored: false,
-        runnable: false,
+        runnable: true,
     },
 ];
 
@@ -247,6 +260,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
             rom,
             detect: Detect::Blargg { reference },
             seconds: secs,
+            model: Some(Model::Dmg),
         });
     };
     for p in walk_gb(&b.join("cpu_instrs/individual")) {
@@ -326,6 +340,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
                 rom: p,
                 detect: Detect::Mooneye,
                 seconds: mooneye_secs,
+                model: Some(Model::Dmg),
             });
         }
     }
@@ -339,6 +354,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
                 rom: p,
                 detect: Detect::Mooneye,
                 seconds: mooneye_secs,
+                model: Some(Model::Dmg),
             });
         }
     }
@@ -355,7 +371,113 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
                 reference: a.join("dmg-acid2-dmg.png"),
             },
             seconds: 10.0,
+            model: Some(Model::Dmg),
         });
+    }
+    // cgb: CGB-model runs (blargg DMG ROMs run in CGB compatibility mode)
+    let cgb_case = |cases: &mut Vec<TestCase>, name: String, rom: PathBuf, detect: Detect, seconds: f64| {
+        if rom.is_file() {
+            cases.push(TestCase {
+                suite: "cgb",
+                name,
+                rom,
+                detect,
+                seconds,
+                model: Some(Model::Cgb),
+            });
+        }
+    };
+    let ca = roms.join("cgb-acid2");
+    cgb_case(
+        &mut cases,
+        "cgb-acid2".into(),
+        ca.join("cgb-acid2.gbc"),
+        Detect::Acid2 {
+            reference: ca.join("cgb-acid2.png"),
+        },
+        10.0,
+    );
+    for p in walk_gb(&b.join("cpu_instrs/individual")) {
+        cgb_case(
+            &mut cases,
+            rel_name(&b, &p),
+            p,
+            Detect::Blargg { reference: None },
+            20.0,
+        );
+    }
+    for (rel, reference, secs) in [
+        ("cpu_instrs/cpu_instrs.gb", "cpu_instrs-dmg-cgb.png", margin(55.0)),
+        ("instr_timing/instr_timing.gb", "instr_timing-dmg-cgb.png", margin(1.0)),
+        ("mem_timing/mem_timing.gb", "mem_timing-dmg-cgb.png", margin(3.0)),
+        ("mem_timing-2/mem_timing.gb", "mem_timing-dmg-cgb.png", margin(4.0)),
+        ("halt_bug.gb", "halt_bug-dmg-cgb.png", margin(2.0)),
+        (
+            "interrupt_time/interrupt_time.gb",
+            "interrupt_time-cgb.png",
+            margin(2.0),
+        ),
+    ] {
+        let rom = b.join(rel);
+        let reference = Some(rom.with_file_name(reference)).filter(|r| r.exists());
+        cgb_case(&mut cases, rel_name(&b, &rom), rom, Detect::Blargg { reference }, secs);
+    }
+    for p in walk_gb(&b.join("mem_timing/individual")) {
+        cgb_case(
+            &mut cases,
+            rel_name(&b, &p),
+            p,
+            Detect::Blargg { reference: None },
+            margin(3.0),
+        );
+    }
+
+    for p in walk_gb(&b.join("cgb_sound/rom_singles")) {
+        cgb_case(
+            &mut cases,
+            rel_name(&b, &p),
+            p,
+            Detect::Blargg { reference: None },
+            30.0,
+        );
+    }
+    let cs = b.join("cgb_sound/cgb_sound.gb");
+    let reference = Some(cs.with_file_name("cgb_sound-cgb.png"));
+    cgb_case(
+        &mut cases,
+        rel_name(&b, &cs),
+        cs,
+        Detect::Blargg { reference },
+        margin(40.0),
+    );
+
+    // cgb-extra (not scored): CGB APU and the SameSuite CGB tests
+    let mut cgb_extra = |name: String, rom: PathBuf, detect: Detect, seconds: f64| {
+        if rom.is_file() {
+            cases.push(TestCase {
+                suite: "cgb-extra",
+                name,
+                rom,
+                detect,
+                seconds,
+                model: Some(Model::Cgb),
+            });
+        }
+    };
+    let hell = roms.join("cgb-acid-hell");
+    cgb_extra(
+        "cgb-acid-hell".into(),
+        hell.join("cgb-acid-hell.gbc"),
+        Detect::Acid2 {
+            reference: hell.join("cgb-acid-hell.png"),
+        },
+        10.0,
+    );
+    let same = roms.join("same-suite");
+    for dir in ["dma", "ppu", "interrupt"] {
+        for p in walk_gb(&same.join(dir)) {
+            cgb_extra(format!("same-suite/{}", rel_name(&same, &p)), p, Detect::Mooneye, 10.0);
+        }
     }
 
     // MBC3: screenshots are the DMG references; times from the howtos plus margin.
@@ -373,6 +495,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
                         buttons,
                     },
                     seconds: secs,
+                    model: Some(Model::Dmg),
                 });
             }
         };

@@ -83,9 +83,13 @@ fn run_blargg(path: &std::path::Path) -> bool {
 }
 
 fn run_mooneye(path: &std::path::Path) -> bool {
+    run_mooneye_exit(path, 0x40)
+}
+
+fn run_mooneye_exit(path: &std::path::Path, exit: u8) -> bool {
     let mut gb = GameBoy::new(std::fs::read(path).unwrap()).unwrap();
     while gb.cycles() < 4_194_304 * 30 {
-        if gb.step() == Some(0x40) {
+        if gb.step() == Some(exit) {
             let r = gb.registers();
             return [r.b, r.c, r.d, r.e, r.h, r.l] == [3, 5, 8, 13, 21, 34];
         }

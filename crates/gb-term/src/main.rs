@@ -8,7 +8,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{cursor, execute};
-use gb_core::GameBoy;
+use gb_core::{GameBoy, Rewind};
 use input::{Action, Input};
 use render::{Encoder, Palette};
 use std::io::{IsTerminal, Write};
@@ -16,11 +16,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: gbterm <rom.gb> [--palette gray|dmg-green|pocket] [--exit-after-frames N] \
+const USAGE: &str =
+    "usage: gbterm <rom.gb> [--palette gray|dmg-green|pocket] [--model dmg|cgb|auto] [--exit-after-frames N] \
 [--dump-frame-ansi FILE]
 
 keys: arrows/WASD d-pad, X/K = A, Z/J = B, Enter = Start, Backspace/Shift+Tab = Select, P pause, Q/Esc quit
-       F1 or [ = save state, F2 or ] = load state (slot 1: <rom>.ss1)";
+       F1 or [ = save state, F2 or ] = load state (slot 1: <rom>.ss1), hold R = rewind";
 
 /// Real DMG refresh rate.
 const FPS: f64 = 59.7275;
@@ -28,6 +29,7 @@ const FPS: f64 = 59.7275;
 struct Args {
     rom: PathBuf,
     palette: Palette,
+    model: Option<gb_core::Model>,
     exit_after: Option<u64>,
     dump: Option<PathBuf>,
 }
@@ -42,6 +44,7 @@ fn parse_args() -> Args {
     let mut a = Args {
         rom: PathBuf::new(),
         palette: Palette::Gray,
+        model: None,
         exit_after: None,
         dump: None,
     };
@@ -52,6 +55,10 @@ fn parse_args() -> Args {
             "--palette" => {
                 let v = val("--palette");
                 a.palette = Palette::parse(&v).unwrap_or_else(|| fail(&format!("unknown palette '{v}'")));
+            }
+            "--model" => {
+                let v = val("--model");
+                a.model = gb_core::Model::parse_choice(&v).unwrap_or_else(|e| fail(&e));
             }
             "--exit-after-frames" => {
                 let v = val("--exit-after-frames");
@@ -159,7 +166,8 @@ fn truncate(s: &str, cols: usize) -> String {
 fn main() {
     let args = parse_args();
     let rom = std::fs::read(&args.rom).unwrap_or_else(|e| fail(&format!("{}: {e}", args.rom.display())));
-    let mut gb = GameBoy::new(rom).unwrap_or_else(|e| fail(&format!("{}: cartridge error: {e:?}", args.rom.display())));
+    let mut gb = GameBoy::with_model_choice(rom, args.model)
+        .unwrap_or_else(|e| fail(&format!("{}: cartridge error: {e:?}", args.rom.display())));
     let sav = sav_path(&args.rom);
     if gb.cartridge().has_battery() {
         if let Ok(data) = std::fs::read(&sav) {
@@ -222,13 +230,19 @@ fn run(gb: &mut GameBoy, args: &Args, title: &str, interactive: bool, mut input:
     let (mut fps_start, mut fps_frames, mut fps) = (Instant::now(), 0u32, 0.0f64);
     let mut last_status = String::new();
     let mut notice: Option<(String, Instant)> = None;
+    let mut rewind = Rewind::default();
 
     while !quit && args.exit_after.is_none_or(|n| frame < n) {
         for (b, pressed) in input.changes(frame) {
             gb.set_button(b, pressed);
         }
         if !paused {
-            gb.run_frame();
+            if input.rewinding(frame) {
+                rewind.pop_into(gb);
+            } else {
+                rewind.frame(gb);
+                gb.run_frame();
+            }
         }
         audio.clear();
         gb.drain_audio(&mut audio);
@@ -257,7 +271,7 @@ fn run(gb: &mut GameBoy, args: &Args, title: &str, interactive: bool, mut input:
             }
             let status = truncate(
                 &format!(
-                    "{title} | {fps:5.1} fps{} | q quit, p pause, F1/[ save, F2/] load{}",
+                    "{title} | {fps:5.1} fps{} | q quit, p pause, F1/[ save, F2/] load, r rewind{}",
                     if paused { " | PAUSED" } else { "" },
                     notice.as_ref().map_or(String::new(), |(n, _)| format!(" | {n}"))
                 ),
@@ -291,12 +305,14 @@ fn run(gb: &mut GameBoy, args: &Args, title: &str, interactive: bool, mut input:
                     Event::Key(k) => match input::map_key(&k) {
                         Some(Action::Quit) if k.kind != KeyEventKind::Release => quit = true,
                         Some(Action::Pause) if k.kind == KeyEventKind::Press => paused = !paused,
+                        Some(Action::Rewind) => input.rewind_key(k.kind, frame),
                         Some(Action::SaveState) if k.kind == KeyEventKind::Press => {
                             notice = Some((save_slot(gb, &args.rom), Instant::now()));
                         }
                         Some(Action::LoadState) if k.kind == KeyEventKind::Press => {
                             let (text, loaded) = load_slot(gb, &args.rom);
                             if loaded {
+                                rewind.clear();
                                 for (b, pressed) in input.resync(frame) {
                                     gb.set_button(b, pressed);
                                 }

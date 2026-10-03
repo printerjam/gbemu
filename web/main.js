@@ -22,6 +22,8 @@ let fpsStart = performance.now();
 let measuredFps = 0;
 let saveKey = null;
 let lastSaved = '';
+let rewindKey = false; // hold Q
+let rewindTouch = false;
 let audio = null;
 
 // ---------- persistence ----------
@@ -89,7 +91,7 @@ function setStatus(msg) { statusEl.textContent = msg; }
 async function loadRom(bytes, name) {
   let next;
   try {
-    next = new Emulator(bytes);
+    next = new Emulator(bytes, $('model').value);
   } catch (e) {
     setStatus(`Cannot load ${name}: ${e.message || e}`);
     return;
@@ -101,6 +103,7 @@ async function loadRom(bytes, name) {
   await startAudio();
   if (audio) { emu.set_sample_rate(audio.ctx.sampleRate); audio.clear?.(); audio.push(new Float32Array(Math.round(audio.ctx.sampleRate * PREFILL_SECONDS) * 2)); }
   emu.set_palette(Number($('palette').value));
+  $('palette').disabled = emu.model() === 'cgb';
   const sav = emu.has_battery() && localStorage.getItem(saveKey);
   if (sav) { try { emu.load_save_data(unb64(sav), Date.now() / 1000); lastSaved = sav; } catch (e) { console.warn(e); } }
   $('hint').style.display = 'none';
@@ -112,7 +115,7 @@ async function loadRom(bytes, name) {
   paused = false;
   $('pause').textContent = 'Pause';
   acc = 0; lastTime = 0; frames = 0;
-  setStatus(`${emu.title() || name}${emu.has_battery() ? ' · battery save' : ''}`);
+  setStatus(`${emu.title() || name}${emu.model().toUpperCase()}${emu.has_battery() ? ' · battery save' : ''}`);
   document.title = `gbemu — ${emu.title() || name}`;
 }
 let lastRom = null;
@@ -140,6 +143,12 @@ $('palette').addEventListener('change', (e) => {
   emu?.set_palette(Number(e.target.value));
   e.target.blur();
   if (emu) draw();
+});
+$('model').value = localStorage.getItem('gb:model') || 'auto';
+$('model').addEventListener('change', (e) => {
+  localStorage.setItem('gb:model', e.target.value);
+  e.target.blur();
+  if (lastRom) loadRom(lastRom.bytes, lastRom.name); // the model is fixed at power-on
 });
 $('pause').addEventListener('click', togglePause);
 $('reset').addEventListener('click', () => lastRom && loadRom(lastRom.bytes, lastRom.name));
@@ -200,6 +209,7 @@ addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLSelectElement && e.key.startsWith('Arrow')) return;
   startAudio();
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (k === 'q') { rewindKey = true; e.preventDefault(); return; }
   if (k === 'p') { if (!e.repeat) togglePause(); return; }
   if (!(k in KEYS)) return;
   e.preventDefault();
@@ -209,12 +219,14 @@ addEventListener('keydown', (e) => {
 });
 addEventListener('keyup', (e) => {
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (k === 'q') rewindKey = false;
   if (!keysDown.has(k)) return;
   const code = keysDown.get(k);
   keysDown.delete(k);
   refreshButton(code);
 });
-addEventListener('blur', () => { const codes = new Set(keysDown.values()); keysDown.clear(); codes.forEach(refreshButton); });
+addEventListener('blur', () => {
+  rewindKey = false; const codes = new Set(keysDown.values()); keysDown.clear(); codes.forEach(refreshButton); });
 
 for (const el of document.querySelectorAll('[data-btn]')) {
   const code = Number(el.dataset.btn);
@@ -230,6 +242,13 @@ for (const el of document.querySelectorAll('[data-btn]')) {
   el.addEventListener('pointercancel', up);
   el.addEventListener('contextmenu', (e) => e.preventDefault());
 }
+
+const rw = $('rw');
+rw.addEventListener('pointerdown', (e) => { e.preventDefault(); rw.setPointerCapture(e.pointerId); rewindTouch = true; rw.classList.add('on'); });
+const rwUp = () => { rewindTouch = false; rw.classList.remove('on'); };
+rw.addEventListener('pointerup', rwUp);
+rw.addEventListener('pointercancel', rwUp);
+rw.addEventListener('contextmenu', (e) => e.preventDefault());
 
 // ---------- main loop ----------
 function draw() {
@@ -256,8 +275,12 @@ function tick(now) {
   let ran = 0;
   while (acc >= FRAME_MS) {
     acc -= FRAME_MS;
-    emu.run_frame();
-    pushAudio();
+    if (rewindKey || rewindTouch) {
+      emu.rewind_step();
+    } else {
+      emu.run_frame();
+      pushAudio();
+    }
     ran++;
     frames++;
   }
@@ -285,6 +308,7 @@ function tick(now) {
     get wasm() { return wasm; },
     get audioState() { return audio ? `${audio.mode}/${audio.ctx.state}/${audio.ctx.currentTime.toFixed(2)}` : null; },
     loadRom,
+    set rewind(v) { rewindKey = v; },
     press: (code, down) => { emu?.set_button(code, down); },
   };
   window.gbdebug.ready = true;

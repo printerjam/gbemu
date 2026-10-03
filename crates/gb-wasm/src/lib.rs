@@ -4,7 +4,7 @@
 //! `ImageData` without copying across the boundary each frame. Audio is drained into a reusable buffer
 //! (`audio_ptr`/`audio_len` after `run_frame`).
 
-use gb_core::{Button, GameBoy, SCREEN_HEIGHT, SCREEN_WIDTH};
+use gb_core::{Button, GameBoy, Model, Rewind, SCREEN_HEIGHT, SCREEN_WIDTH};
 use wasm_bindgen::prelude::*;
 
 /// Shades from lightest to darkest, same tables as the desktop and terminal frontends.
@@ -40,21 +40,25 @@ pub struct Emulator {
     audio: Vec<f32>,
     palette: usize,
     rom_hash: u32,
+    rewind: Rewind,
 }
 
 #[wasm_bindgen]
 impl Emulator {
-    /// Power on with a ROM image. Throws a string error for unsupported/invalid cartridges.
+    /// Power on with a ROM image. `model` is `"auto"` (follow the cartridge header), `"dmg"` or `"cgb"`.
+    /// Throws a string error for unsupported/invalid cartridges or an unknown model.
     #[wasm_bindgen(constructor)]
-    pub fn new(rom: &[u8]) -> Result<Emulator, JsError> {
+    pub fn new(rom: &[u8], model: &str) -> Result<Emulator, JsError> {
         let rom_hash = fnv1a(rom);
-        let gb = GameBoy::new(rom.to_vec()).map_err(|e| JsError::new(&e.to_string()))?;
+        let choice = Model::parse_choice(model).map_err(|e| JsError::new(&e))?;
+        let gb = GameBoy::with_model_choice(rom.to_vec(), choice).map_err(|e| JsError::new(&e.to_string()))?;
         let mut emu = Emulator {
             gb,
             rgba: vec![0xFF; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
             audio: Vec::new(),
             palette: 0,
             rom_hash,
+            rewind: Rewind::default(),
         };
         emu.convert_frame();
         Ok(emu)
@@ -79,10 +83,33 @@ impl Emulator {
 
     /// Emulate one video frame, refresh the RGBA frame and collect the audio produced.
     pub fn run_frame(&mut self) {
+        self.rewind.frame(&self.gb);
         self.gb.run_frame();
         self.convert_frame();
         self.audio.clear();
         self.gb.drain_audio(&mut self.audio);
+    }
+
+    /// Step back one rewind snapshot (a few frames of game time) and refresh the frame. Returns false when
+    /// there is no history left. Audio is not produced while rewinding.
+    pub fn rewind_step(&mut self) -> bool {
+        let ok = self.rewind.pop_into(&mut self.gb);
+        if ok {
+            self.convert_frame();
+        }
+        self.audio.clear();
+        self.gb.drain_audio(&mut self.audio);
+        self.audio.clear();
+        ok
+    }
+
+    /// `"dmg"` or `"cgb"`: the model actually running (after resolving `auto`).
+    pub fn model(&self) -> String {
+        match self.gb.model() {
+            Model::Cgb => "cgb",
+            Model::Dmg => "dmg",
+        }
+        .to_string()
     }
 
     pub fn frame_ptr(&self) -> *const u8 {
@@ -154,9 +181,11 @@ impl Emulator {
 
 impl Emulator {
     fn convert_frame(&mut self) {
+        let cgb = self.gb.model() == Model::Cgb;
         let table = PALETTES[self.palette];
         for (px, out) in self.gb.framebuffer().iter().zip(self.rgba.as_chunks_mut::<4>().0) {
             let rgb = match px & 0xFF_FFFF {
+                other if cgb => other,
                 0xFFFFFF => table[0],
                 0xAAAAAA => table[1],
                 0x555555 => table[2],
@@ -181,7 +210,7 @@ mod tests {
 
     #[test]
     fn frame_is_rgba_and_palette_applies() {
-        let mut e = Emulator::new(&rom()).ok().unwrap();
+        let mut e = Emulator::new(&rom(), "auto").ok().unwrap();
         e.run_frame();
         assert_eq!(e.frame_len(), 160 * 144 * 4);
         assert!(e.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 0xFF));
@@ -193,7 +222,7 @@ mod tests {
 
     #[test]
     fn state_roundtrip_through_wrapper() {
-        let mut e = Emulator::new(&rom()).ok().unwrap();
+        let mut e = Emulator::new(&rom(), "auto").ok().unwrap();
         e.run_frame();
         let st = e.save_state();
         e.run_frame();
@@ -202,8 +231,20 @@ mod tests {
     }
 
     #[test]
+    fn rewind_returns_to_an_earlier_snapshot() {
+        let mut e = Emulator::new(&rom(), "auto").ok().unwrap();
+        for _ in 0..8 {
+            e.run_frame();
+        }
+        let before = e.save_state();
+        e.run_frame(); // snapshot of `before` is taken at the start of this frame
+        assert!(e.rewind_step());
+        assert_eq!(e.save_state(), before);
+    }
+
+    #[test]
     fn audio_accumulates_per_frame_at_sample_rate() {
-        let mut e = Emulator::new(&rom()).ok().unwrap();
+        let mut e = Emulator::new(&rom(), "auto").ok().unwrap();
         e.set_sample_rate(48_000);
         e.run_frame();
         e.run_frame();
