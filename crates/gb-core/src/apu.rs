@@ -142,6 +142,8 @@ pub struct Apu {
     div_bit: bool,
     /// Powered on while the DIV bit was high: the first frame sequencer event is skipped.
     skip_fs: bool,
+    #[serde(skip)]
+    ds: bool,
     /// After such a power-on the sequencer behaves as if its next step were odd until the first event runs.
     #[serde(skip)]
     fs_quirk_odd: bool,
@@ -203,6 +205,7 @@ impl Apu {
             power_on_at: 0,
             div_bit: false,
             skip_fs: false,
+            ds: false,
             fs_quirk_odd: false,
             level_changes: 0,
             power: true,
@@ -249,6 +252,7 @@ impl Apu {
 
     /// Advance `t_cycles` T-cycles.
     pub fn tick(&mut self, t_cycles: u32) {
+        self.ds = t_cycles < 4;
         let mut remaining = t_cycles;
         let rate = self.sample_rate as u64;
         while remaining > 0 {
@@ -446,14 +450,21 @@ impl Apu {
         (2048 - f) * 4
     }
 
-    /// Time to the first duty step after a trigger: the period plus two ticks, rounded up to the next edge of
-    /// the 1 MHz channel clock (matters in double speed, where a CPU cycle is only 2 T).
+    /// Time to the first duty step after a trigger (CGB): the period plus two ticks (one if the channel was already
+    /// running), rounded up to the next edge of the 1 MHz channel clock, which restarts at power-on. In double
+    /// speed the extra ticks are dropped: SameSuite (CGB-E) wants them, Gambatte (CGB-C) does not, and we follow
+    /// Gambatte there, as SameBoy does for pre-D revisions.
     fn square_start(&self, base: usize, active: bool) -> u32 {
         if !self.cgb {
             return self.square_period(base);
         }
         let t = self.square_period(base) + if active { 4 } else { 8 };
-        t + (4 - ((self.cycles.wrapping_sub(self.power_on_at) as u32 + t) & 3)) % 4
+        let delta = (4 - ((self.cycles.wrapping_sub(self.power_on_at) as u32 + t) & 3)) % 4;
+        if self.ds {
+            t - 8 + delta
+        } else {
+            t + delta
+        }
     }
 
     fn wave_period(&self) -> u32 {
@@ -505,7 +516,11 @@ impl Apu {
     fn digital(&self) -> [u8; 4] {
         let cgb = self.cgb;
         let sq = |c: &Square, nrx1: u8| {
-            let bit = if cgb { c.out } else { DUTY[(nrx1 >> 6) as usize][c.pos as usize] };
+            let bit = if cgb {
+                c.out
+            } else {
+                DUTY[(nrx1 >> 6) as usize][c.pos as usize]
+            };
             if c.enabled {
                 bit * c.env.volume
             } else {
@@ -1048,5 +1063,57 @@ mod tests {
         let expect = CLOCK as f32 / 9536.0;
         assert!((hz - expect).abs() < 2.0, "hz {hz} expect {expect}");
         assert!(left.iter().all(|s| s.abs() <= 1.0));
+    }
+
+    #[test]
+    fn pcm12_exposes_digital_square_output() {
+        let mut a = Apu::new();
+        a.set_cgb(true);
+        a.write(0xFF26, 0x00);
+        a.write(0xFF26, 0x80);
+        a.write(0xFF16, 0x80); // 50% duty
+        a.write(0xFF17, 0xF0); // volume 15
+        a.write(0xFF18, 0xFC);
+        a.write(0xFF19, 0x87); // period 16 T
+        let mut seen = [false; 16];
+        for _ in 0..64 {
+            a.tick(4);
+            let v = a.pcm12();
+            assert_eq!(v & 0x0F, 0, "channel 1 is silent");
+            seen[(v >> 4) as usize] = true;
+        }
+        assert!(seen[0] && seen[15], "output alternates between 0 and the volume");
+        assert_eq!(a.pcm34(), 0);
+    }
+
+    #[test]
+    fn powering_on_while_div_bit_is_high_skips_the_first_sequencer_event() {
+        let run = |div_high: bool| {
+            let mut a = Apu::new();
+            a.write(0xFF26, 0x00);
+            a.set_div_bit(div_high);
+            a.write(0xFF26, 0x80);
+            a.write(0xFF17, 0xF0);
+            a.write(0xFF16, 63); // length 1
+            a.write(0xFF19, 0xC0);
+            a.frame_sequencer_step();
+            a.read(0xFF26) & 2
+        };
+        assert_eq!(run(false), 0, "step 0 clocks the length");
+        assert_eq!(run(true), 2, "the first event is skipped");
+    }
+
+    #[test]
+    fn cgb_envelope_write_zombie_mode() {
+        let mut a = Apu::new();
+        a.set_cgb(true);
+        a.write(0xFF26, 0x00);
+        a.write(0xFF26, 0x80);
+        a.write(0xFF17, 0x48); // volume 4, add mode, period 0
+        a.write(0xFF19, 0x80);
+        a.write(0xFF17, 0x49); // period 0 -> 1 while running: one extra tick (+1)
+        assert_eq!(a.ch2.env.volume, 5);
+        a.write(0xFF17, 0x41); // add -> subtract inverts: 16 - 5
+        assert_eq!(a.ch2.env.volume, 11);
     }
 }
