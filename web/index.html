@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>gbemu</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #1b1d22; color: #d8dae0; font: 14px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center; padding: 8px; width: 100%; }
+  header label.file, header button, header select {
+    background: #2d3038; color: inherit; border: 1px solid #454956; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer;
+  }
+  header button:hover, header label.file:hover { background: #393d48; }
+  header button:disabled { opacity: .45; cursor: default; }
+  #file { display: none; }
+  main { position: relative; width: min(100vw, 640px); padding: 0 8px; }
+  canvas { display: block; width: 100%; aspect-ratio: 160 / 144; image-rendering: pixelated; image-rendering: crisp-edges; background: #000; border-radius: 4px; }
+  #hint { position: absolute; inset: 0 8px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px; pointer-events: none; color: #9aa; }
+  #status { min-height: 1.4em; font-size: 12px; color: #8a8f9c; padding: 4px 8px; text-align: center; }
+  body.drag main canvas { outline: 3px dashed #6aa0ff; }
+  #pad { display: none; width: min(100vw, 480px); padding: 8px 16px calc(16px + env(safe-area-inset-bottom)); justify-content: space-between; align-items: center; gap: 8px; }
+  @media (pointer: coarse), (max-width: 700px) { #pad { display: flex; } }
+  #dpad { display: grid; grid-template: repeat(3, 52px) / repeat(3, 52px); }
+  #dpad .b { border-radius: 8px; }
+  #ab { display: flex; gap: 14px; transform: rotate(-18deg); }
+  #ab .b { width: 64px; height: 64px; border-radius: 50%; font-weight: 700; }
+  #ss { display: flex; gap: 10px; width: 100%; justify-content: center; margin-top: 4px; }
+  #ss .b { padding: 6px 14px; border-radius: 12px; font-size: 12px; }
+  .b { background: #3a3e4a; border: 1px solid #50556a; color: #d8dae0; display: flex; align-items: center; justify-content: center; touch-action: none; }
+  .b.on { background: #6aa0ff; color: #000; }
+  .wrap { display: flex; flex-wrap: wrap; width: 100%; justify-content: space-between; }
+  footer { font-size: 12px; color: #6d7280; padding: 8px; text-align: center; }
+  kbd { background: #2d3038; border: 1px solid #454956; border-radius: 4px; padding: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <label class="file">Load ROM… <input id="file" type="file" accept=".gb,.gbc,.bin,application/octet-stream"></label>
+  <select id="palette" title="Palette">
+    <option value="0">Gray</option>
+    <option value="1">DMG green</option>
+    <option value="2">Pocket</option>
+  </select>
+  <button id="pause" disabled>Pause</button>
+  <button id="reset" disabled>Reset</button>
+  <button id="savestate" disabled>Save state</button>
+  <button id="loadstate" disabled>Load state</button>
+</header>
+<main>
+  <canvas id="screen" width="160" height="144"></canvas>
+  <div id="hint">Drop a .gb ROM here or use “Load ROM…”</div>
+</main>
+<div id="status">&nbsp;</div>
+<div id="pad">
+  <div class="wrap">
+    <div id="dpad">
+      <span></span><div class="b" data-btn="2">▲</div><span></span>
+      <div class="b" data-btn="1">◀</div><span></span><div class="b" data-btn="0">▶</div>
+      <span></span><div class="b" data-btn="3">▼</div><span></span>
+    </div>
+    <div id="ab"><div class="b" data-btn="5">B</div><div class="b" data-btn="4">A</div></div>
+    <div id="ss"><div class="b" data-btn="6">SELECT</div><div class="b" data-btn="7">START</div></div>
+  </div>
+</div>
+<footer>
+  <kbd>←↑↓→</kbd>/<kbd>WASD</kbd> d-pad · <kbd>X</kbd> A · <kbd>Z</kbd> B · <kbd>Enter</kbd> Start · <kbd>Backspace</kbd> Select · <kbd>P</kbd> pause
+</footer>
+<script type="module" src="main.js"></script>
+</body>
+</html>

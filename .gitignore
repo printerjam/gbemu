@@ -3,3 +3,4 @@
 *.sav
 /out
 /homebrew
+web/pkg/
