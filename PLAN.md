@@ -107,7 +107,7 @@ cargo install wasm-bindgen-cli --version 0.2.129 --locked   # must equal the was
 (opt-level 3, fat LTO, panic=abort) and runs `wasm-bindgen --target web` into `web/pkg/` (git-ignored). The page is
 plain ES modules, no bundler: ROM picker/drag&drop, canvas scaled with `image-rendering: pixelated`, keyboard +
 touch pad, AudioWorklet output (ScriptProcessor fallback on insecure origins), 59.7275 Hz accumulator pacing,
-battery saves and save states in `localStorage` keyed by `title:fnv1a(rom)`, palette select. AudioWorklet needs
+model select (auto/DMG/CGB, applied at power-on), hold-Q / on-screen button rewind, battery saves and save states in `localStorage` keyed by `title:fnv1a(rom)`, palette select. AudioWorklet needs
 a secure context (`localhost` counts).
 
 `.github/workflows/pages.yml` publishes `web/` to GitHub Pages on every push to `main`: stable toolchain +
