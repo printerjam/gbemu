@@ -7,9 +7,9 @@
 use crate::irq;
 use serde::{Deserialize, Serialize};
 
-/// Empirical: a TAC write evaluates the falling-edge check against the divider two M-cycles
-/// later than the tick-then-write model implies (mooneye timer/rapid_toggle needs exactly this).
-const AHEAD: u16 = 8;
+/// Empirical (gambatte tima/tc00_late_tc01*): a TAC write checks the newly selected clock bit
+/// against the divider one M-cycle earlier than the tick-then-write model implies.
+const NEW_CLOCK_LEAD: u16 = 4;
 
 #[derive(Serialize, Deserialize)]
 pub struct Timer {
@@ -22,8 +22,8 @@ pub struct Timer {
     overflow_pending: bool,
     /// The reload happened on the last tick (TIMA writes ignored, TMA writes propagate).
     reloading: bool,
-    /// A DIV/TAC write produced a falling edge; the increment lands at the start of the next M-cycle.
-    deferred_inc: bool,
+    /// IF bits raised by a register write, collected by the bus right after the write.
+    write_irq: u8,
 }
 
 impl Timer {
@@ -40,7 +40,7 @@ impl Timer {
             tac: 0,
             overflow_pending: false,
             reloading: false,
-            deferred_inc: false,
+            write_irq: 0,
         }
     }
 
@@ -66,6 +66,23 @@ impl Timer {
         }
     }
 
+    /// Increment caused by a DIV/TAC write (falling-edge glitch). An overflow here reloads TIMA and
+    /// raises the interrupt right away instead of one M-cycle later.
+    fn increment_from_write(&mut self) {
+        self.increment();
+        if self.overflow_pending {
+            self.overflow_pending = false;
+            self.reloading = true;
+            self.tima = self.tma;
+            self.write_irq |= irq::TIMER;
+        }
+    }
+
+    /// IF bits raised by the last register write.
+    pub fn take_write_irq(&mut self) -> u8 {
+        std::mem::take(&mut self.write_irq)
+    }
+
     /// Advance one M-cycle (4 T-cycles). Returns IF bits to raise.
     pub fn tick(&mut self) -> u8 {
         let mut irqs = 0;
@@ -75,10 +92,6 @@ impl Timer {
             self.reloading = true;
             self.tima = self.tma;
             irqs = irq::TIMER;
-        }
-        if self.deferred_inc {
-            self.deferred_inc = false;
-            self.increment();
         }
         let before = self.signal();
         self.div = self.div.wrapping_add(4);
@@ -107,7 +120,9 @@ impl Timer {
             0xFF04 => {
                 let before = self.signal();
                 self.div = 0;
-                self.deferred_inc |= before;
+                if before {
+                    self.increment_from_write();
+                }
             }
             0xFF05 => {
                 if !self.reloading {
@@ -122,10 +137,11 @@ impl Timer {
                 }
             }
             _ => {
-                let ahead = self.div.wrapping_add(AHEAD);
-                let before = self.signal_at(ahead);
+                let before = self.signal();
                 self.tac = val & 7;
-                self.deferred_inc |= before && !self.signal_at(ahead);
+                if before && !self.signal_at(self.div.wrapping_sub(NEW_CLOCK_LEAD)) {
+                    self.increment_from_write();
+                }
             }
         }
     }

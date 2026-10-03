@@ -1,9 +1,76 @@
 # gbemu
 
-A Game Boy (DMG) emulator written from scratch in Rust: CPU, PPU, APU, timer, serial, joypad and the common memory
-bank controllers, no emulator crates. `gb-core` has no I/O; its only dependencies are `serde` and `bincode` (save
-states). Windowing, audio, terminal and PNG code live in the frontends and tools. Architecture and contracts:
-`PLAN.md`; status and scoreboard: `PROGRESS.md`.
+A Game Boy / Game Boy Color emulator written from scratch in Rust, with no emulator crates: SM83 CPU, scanline PPU
+with dot-accurate mode timing, four-channel APU, timer, serial, joypad, MBC1/2/3(RTC)/5, save states and rewind.
+`gb-core` has no I/O (its only dependencies are `serde` and `bincode`, for save states), so the same core drives a
+desktop window, a terminal, a TUI debugger, a headless test runner and a WebAssembly build.
+It passes all 152 scored test ROMs (blargg, mooneye, acid2, CGB, MBC suites) and plays real homebrew.
+
+**Try it in the browser: <https://printerjam.github.io/gbemu/>** (bring your own ROM; nothing is uploaded).
+
+<p align="center">
+  <img src="docs/screenshots/tobu-tobu-girl.png" width="320" alt="Tobu Tobu Girl running in gbemu">
+  <img src="docs/screenshots/geometrix.png" width="320" alt="Geometrix running in gbemu in Game Boy Color mode">
+</p>
+<p align="center">
+  <img src="docs/screenshots/dmg-acid2.png" width="240" alt="dmg-acid2, pixel-exact">
+  <img src="docs/screenshots/cgb-acid2.png" width="240" alt="cgb-acid2, pixel-exact">
+</p>
+
+| `gbterm`: truecolor half-block terminal frontend | the browser build |
+|---|---|
+| <img src="docs/screenshots/gbterm.png" alt="gbterm rendering Tobu Tobu Girl in a terminal"> | <img src="docs/screenshots/web.png" alt="the web build playing Tobu Tobu Girl"> |
+
+<img src="docs/screenshots/gbdbg.png" alt="gbdbg, the TUI debugger: disassembly, registers, memory, live screen">
+
+*`gbdbg`, the TUI debugger. All screenshots were produced by this repository's own tools (`gbemu --screenshot-at-frame`, `gbterm --dump-frame-ansi`, `gbdbg` under tmux, the web build in Chromium); the game
+screenshots are scaled 3x with nearest-neighbour.*
+
+Screenshot credits (no ROMs are included in this repository):
+[Tobu Tobu Girl](https://github.com/SimonLarsen/tobutobugirl) by Tangram Games / Simon Larsen (MIT);
+[Geometrix](https://github.com/AntonioND/geometrix) by Antonio Niño Díaz (GPL-3.0-or-later);
+[dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2) by Matt Currie (MIT).
+
+## Features
+
+- **CPU/timing:** every memory access advances the whole machine one M-cycle; interrupts, HALT bug, EI delay.
+- **PPU:** DMG and CGB, background/window/sprites, CGB palettes and VRAM banking; pixel-exact dmg-acid2 and cgb-acid2.
+- **APU:** four channels, frame sequencer, CGB/DMG quirks; blargg `dmg_sound` and `cgb_sound` pass.
+- **Cartridges:** ROM only, MBC1 (incl. multicarts), MBC2, MBC3 with RTC (up to MBC30), MBC5; battery saves.
+- **Save states and rewind:** versioned, checksummed state files (F1..F4); about 20 seconds of rewind history.
+- **Frontends:** `gbemu` (window + audio, scriptable input and screenshots), `gbterm`, `gbdbg`, WebAssembly.
+- **Tooling:** `gbtest` runs the whole free test-ROM collection and guards against regressions.
+
+### Test scoreboard
+
+| Suite | Passed | Total |
+|---|---|---|
+| blargg | 19 | 19 |
+| mooneye | 66 | 66 |
+| mooneye-mbc | 28 | 28 |
+| acid2 | 1 | 1 |
+| cgb | 34 | 34 |
+| mbc3 | 4 | 4 |
+| **Score** | **152** | **152** |
+
+Beyond the scored suites, `scripts/scoreboard.sh` tracks 6161 ROMs from the wider collection (gambatte, gbmicrotest, mealybug, age, same-suite, wilbertpol...), currently 3513 passing.
+Live numbers and milestone evidence are in [`PROGRESS.md`](PROGRESS.md); architecture and contracts in
+[`PLAN.md`](PLAN.md).
+
+## Quick start
+
+```sh
+git clone https://github.com/printerjam/gbemu && cd gbemu
+cargo build --release
+scripts/fetch-roms.sh                                    # free test ROMs into ./roms (optional)
+target/release/gbemu roms/dmg-acid2/dmg-acid2.gb         # window, 4x scale
+target/release/gbterm roms/dmg-acid2/dmg-acid2.gb        # same, in a truecolor terminal
+target/release/gbtest                                    # run the test-ROM scoreboard
+```
+
+For something to play, download a free homebrew game from the [Homebrew Hub](https://hh.gbdev.io/), for example
+[Tobu Tobu Girl](https://hh.gbdev.io/game/tobutobugirl), and pass its `.gb` file to `gbemu`. Linux needs the ALSA
+development headers (`libasound2-dev`) for audio; the web build is described in `scripts/build-web.sh`.
 
 ## Build
 
