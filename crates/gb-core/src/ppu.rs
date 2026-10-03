@@ -12,6 +12,10 @@ mod pipe;
 use pipe::Pipe;
 
 const DOTS_PER_LINE: u16 = 456;
+/// HDMA's HBlank request precedes the visible mode-0 entry by one M-cycle at single speed
+/// (gambatte `hdma_start_*`/`late_hdma_vs_*` boundary pairs); in double speed it coincides with it.
+const HBLANK_EARLY_SS: u16 = 4;
+const MODE3_RUNNING_MARK: u16 = 0xFF00;
 const LINES: u8 = 154;
 /// Dots at the start of a line during which the visible mode and LYC flag
 /// still reflect the previous line.
@@ -90,6 +94,8 @@ pub struct Ppu {
     pipe: Pipe,
     /// Palette register whose OR-glitch value is replaced by the written value on the next dot.
     pal_fix: Option<(u8, u8)>,
+    /// CGB double speed (set by the bus): HDMA's HBlank request keeps its old (mode-0 visible) timing.
+    double_speed: bool,
     /// Mode sources seen by the last STAT line evaluation.
     stat_key: u8,
     sprites: [Sprite; 10],
@@ -169,6 +175,7 @@ impl Ppu {
             pipe: Pipe::default(),
             pal_fix: None,
             stat_key: 0,
+            double_speed: false,
             sprites: [Sprite::default(); 10],
             sprite_count: 0,
             wy_triggered: false,
@@ -261,6 +268,10 @@ impl Ppu {
         self.lcd_on() && self.mode == 3
     }
 
+    pub fn set_double_speed(&mut self, ds: bool) {
+        self.double_speed = ds;
+    }
+
     /// True while HDMA may start a block right away: HBlank on a visible line, or LCD off.
     pub fn in_hblank(&self) -> bool {
         !self.lcd_on() || (self.mode == 0 && self.ly < 144 && !self.first_line)
@@ -341,8 +352,16 @@ impl Ppu {
                 self.frame_ready = true;
             }
         } else {
-            for _ in 0..dots {
-                self.step_dot();
+            let mut left = dots;
+            while left > 0 {
+                let skip = self.idle_dots().min(left);
+                if skip > 0 {
+                    self.dot += skip as u16;
+                    left -= skip;
+                } else {
+                    self.step_dot();
+                    left -= 1;
+                }
             }
         }
         std::mem::take(&mut self.pending_irq)
@@ -355,11 +374,27 @@ impl Ppu {
         std::mem::take(&mut self.pending_irq)
     }
 
+    /// Dots that can be skipped without any observable change: HBlank/VBlank stretches after the
+    /// unlock and before the last dot of the line.
+    #[inline]
+    fn idle_dots(&self) -> u32 {
+        if self.pipe.active || self.pipe_draining() || self.pal_fix.is_some() || self.dot < 9 {
+            return 0;
+        }
+        let idle = self.ly >= 144 || (self.mode0_dot < MODE3_RUNNING_MARK && self.dot > self.mode0_dot + LINE_PREFIX);
+        if idle && self.dot < DOTS_PER_LINE - 1 {
+            (DOTS_PER_LINE - 1 - self.dot) as u32
+        } else {
+            0
+        }
+    }
+
     fn step_dot(&mut self) {
         self.dot += 1;
         if self.dot == DOTS_PER_LINE {
             self.dot = 0;
             self.first_line = false;
+            self.mode0_dot = MODE3_RUNNING_MARK;
             self.ly = if self.ly == LINES - 1 { 0 } else { self.ly + 1 };
             if self.ly == 0 {
                 self.wy_triggered = false;
@@ -409,9 +444,13 @@ impl Ppu {
                 self.irq_mode = 0;
             } else if self.dot == self.mode0_dot + LINE_PREFIX {
                 self.mode = 0;
-                self.hblank_event = true;
                 self.unlock_all();
             }
+        }
+        if self.ly < 144
+            && self.dot + if self.double_speed { 0 } else { HBLANK_EARLY_SS } == self.mode0_dot + LINE_PREFIX
+        {
+            self.hblank_event = true;
         }
         if self.dot == LINE_PREFIX + 4 {
             self.vblank_oam_irq = false;
@@ -604,6 +643,7 @@ impl Ppu {
                     self.ly = 0;
                     self.dot = FIRST_LINE_DOT;
                     self.first_line = true;
+                    self.mode0_dot = MODE3_RUNNING_MARK;
                     self.mode = 0;
                     self.irq_mode = 3;
                     self.unlock_all();
