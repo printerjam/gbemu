@@ -491,15 +491,13 @@ impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Read);
-        let v = self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr));
-        v
+        self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr))
     }
 
     fn read_idu(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::ReadInc);
-        let v = self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr));
-        v
+        self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr))
     }
 
     fn write(&mut self, addr: u16, val: u8) {
