@@ -80,6 +80,7 @@ impl Bus {
         let ppu = Ppu::new_cgb(cart.header().cgb_supported());
         let mut bus = Self::with_ppu(cart, ppu, true);
         bus.timer = Timer::with_div(CGB_POST_BOOT_DIV);
+        bus.apu.set_cgb(true);
         bus
     }
 
