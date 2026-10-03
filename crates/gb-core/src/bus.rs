@@ -144,12 +144,18 @@ impl Bus {
             }
             0xFF00 => self.joypad.write(val),
             0xFF01..=0xFF02 => self.serial.write(addr, val),
-            0xFF04..=0xFF07 => self.timer.write(addr, val),
+            0xFF04..=0xFF07 => {
+                let before = self.timer.div_counter();
+                self.timer.write(addr, val);
+                if before & 0x1000 != 0 && self.timer.div_counter() & 0x1000 == 0 {
+                    self.apu.frame_sequencer_step();
+                }
+            }
             0xFF0F => self.int_flag = val & 0x1F,
             0xFF10..=0xFF3F => self.apu.write(addr, val),
             0xFF46 => {
                 self.dma.reg = val;
-                self.dma.pending = Some((0, (val as u16) << 8));
+                self.dma.pending = Some((1, (val as u16) << 8));
             }
             0xFF40..=0xFF4B => self.ppu.write_reg(addr, val),
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = val,
