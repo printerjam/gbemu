@@ -102,21 +102,50 @@ a DIV bit (bit 8, bit 3 for the CGB fast clock), so a transfer started mid-perio
 
 ## PPU
 
-> This section describes the PPU as of the scanline renderer. The pixel FIFO is being landed by the PPU agent;
-> this section is to be updated after that merge.
+`Ppu::tick(dots)` advances a dot-level state machine (`ppu.rs`): 456 dots per line, 154 lines (144 visible + 10
+VBlank). Each visible line goes through mode 2 (OAM scan, 80 dots; the sprite list is built at its end), mode 3
+(drawing) and mode 0 (HBlank). STAT (0xFF41) mirrors the mode and the LYC comparison and has its own interrupt line,
+which rises on the OR of the enabled sources (the "STAT blocking" rule). CPU VRAM/OAM access is blocked in the modes
+that hardware blocks it, with slightly different windows for reads and writes on DMG. The LCD-off/on quirks (line 0
+without OAM scan, LY=153 reading 0 early) are modelled; a mode-0 request for HDMA is raised via `take_hblank`.
 
-`Ppu::tick(dots)` advances a dot-level state machine: 456 dots per line, 154 lines (144 visible + 10 VBlank). Each
-visible line goes through mode 2 (OAM scan, 80 dots), mode 3 (drawing, 172+ dots depending on SCX, window and sprites)
-and mode 0 (HBlank). STAT (0xFF41) mirrors the mode and the LYC comparison and has its own interrupt line, which
-rises on the OR of the enabled sources (the "STAT blocking" rule). The CPU's VRAM/OAM access is blocked in the modes
-that hardware blocks it, with slightly different windows for reads and writes on DMG.
+### Pixel pipeline (`ppu/pipe.rs`)
 
-Currently each line is **rendered in one go when mode 3 ends** (`render_line`): background, window and up to ten
-sprites per line are composed from one snapshot of the registers. Mode-3 *length* is computed from SCX, window start
-and sprite fetch penalties, so STAT timing is dot-accurate even though pixel production is not. The consequence:
-CPU writes to SCX/SCY/LCDC/BGP *during* mode 3 have no per-pixel effect, which is what the gambatte
-`scx_during_m3`, `scy`, `bgtiledata`, `bgtilemap` screenshot groups and the mealybug tests measure. A pixel-FIFO
-renderer (per-dot fetcher and pixel pipeline) is the planned fix.
+Mode 3 is a dot-by-dot pixel pipeline, so mid-line writes to SCX/SCY/LCDC/BGP/OBP/WX take effect at the right pixel
+and the *length of mode 3 emerges* from the fetcher instead of a formula:
+
+- **BG/window fetcher**: six steps per 8-pixel row (tile index, low byte, high byte, two dots each). Each value is read
+  with the register state of its own dot (`TILE_INDEX_STEP`/`TILE_LO_STEP`/`TILE_HI_STEP`). The row is pushed into the
+  8-entry **BG FIFO** when it is empty; the fetcher restarts the same dot.
+- **Pixel clock**: one pop per dot from the BG FIFO and the aligned **OBJ FIFO**. The pixel counter `cx` counts pops;
+  the first 8 are a left margin (so sprites at OAM X < 8 can match), then `SCX & 7` discarded pixels. The FIFO is
+  pre-loaded with blanks and pops start at dot 5, so the first real row is pushed at dot 13 (12 dots startup + 160
+  pixels = the 172-dot minimum).
+- **Window**: when `cx` reaches `WX + 1 + SCX%8` (and WY matched, LCDC.5 set) the BG FIFO is flushed and the fetcher
+  restarts on window tiles: a 6-dot penalty. The internal window line counter advances only on lines where the window
+  was drawn.
+- **Sprites**: sprites (X-sorted, 10 per line) whose X matches `cx` stall the pixel clock until the BG fetch row is
+  complete (so the cost depends on `(X + SCX) % 8`), then 6 dots for the sprite row fetch; the row is merged into the
+  OBJ FIFO (DMG: earlier fetch wins; CGB with OPRI=0: lower OAM index wins). When any sprite was fetched, mode 3 ends
+  3 dots before the last pixel (`SPRITE_TAIL`), which is what the mooneye `intr_2_mode0_timing_sprites` table measures.
+- **Colour lookup** happens 7 dots after a pixel leaves the FIFOs (`MIX_DELAY`), LCDC.0/1 are sampled at 6; this
+  models the real latency between the FIFO and the LCD and is what the mealybug BGP/OBP tests pin down. On DMG a
+  palette register reads as `old | new` for one dot after a write.
+
+The fetcher constants and delays are *fitted* to the mooneye PPU tests and the mealybug screenshots; the closed-form
+mode-3 length (172 + SCX%8, sprite penalties `5 - min(5, (X+SCX)%8)` + 6, first-sprite and window corrections) is kept
+as a unit-test oracle for the emerged length. Known gaps are listed in `PROGRESS.md`.
+
+DMG VRAM is initialised as the boot ROM leaves it (logo tiles from the cartridge header, the (R) tile, tile map), since
+tests such as mealybug use those tiles.
+
+### CGB
+
+`Ppu::new_cgb(cgb_game)`: VRAM bank 1 (VBK), BG map attributes (palette, bank, flips, priority), palette RAM
+(BCPS/BCPD, OCPS/OCPD with auto-increment, locked in mode 3; colours expanded with `(x<<3)|(x>>2)`), OAM-order sprite
+priority (OPRI), and DMG-compat mode (a DMG cartridge on CGB hardware renders through palette RAM preloaded with the
+boot ROM's colours). HDMA/GDMA and the speed switch live in `bus.rs`; in double speed the PPU still gets the normal
+dot rate (2 dots per CPU M-cycle).
 
 Framebuffer: 160x144 `u32` as `0x00RRGGBB`. On DMG the four shades are exactly `0xFFFFFF/0xAAAAAA/0x555555/0x000000`
 so screenshots compare bit-exact against the test suites' references; frontends recolor.
