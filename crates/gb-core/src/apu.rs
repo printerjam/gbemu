@@ -70,7 +70,11 @@ impl Envelope {
         if self.locked || nrx2 & 7 == 0 {
             return;
         }
-        self.volume = if nrx2 & 8 != 0 { self.volume + 1 } else { self.volume.wrapping_sub(1) } & 15;
+        self.volume = if nrx2 & 8 != 0 {
+            self.volume + 1
+        } else {
+            self.volume.wrapping_sub(1)
+        } & 15;
     }
 
     /// CGB: the countdown runs every 64 Hz step whether or not the envelope is enabled.
@@ -101,7 +105,11 @@ impl Envelope {
         let mut v = self.volume;
         if invert {
             if new & 8 != 0 {
-                v = if old & 7 == 0 && !self.locked { v ^ 0xF } else { 0xEu8.wrapping_sub(v) & 0xF };
+                v = if old & 7 == 0 && !self.locked {
+                    v ^ 0xF
+                } else {
+                    0xEu8.wrapping_sub(v) & 0xF
+                };
                 tick = false;
             } else {
                 v = 0x10u8.wrapping_sub(v) & 0xF;
