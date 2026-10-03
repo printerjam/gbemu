@@ -171,6 +171,7 @@ impl Bus {
 
     /// One M-cycle of the CPU clock. In double speed the PPU/APU still run at the normal
     /// rate (2 dots per M-cycle); OAM DMA and the cartridge clock run every second M-cycle.
+    #[inline]
     fn tick_cycle(&mut self) {
         let dots = if self.double_speed { 2 } else { 4 };
         self.cycles += dots as u64;
@@ -198,6 +199,7 @@ impl Bus {
     }
 
     /// APU frame sequencer steps on the falling edge of DIV bit 12 (bit 13 in double speed).
+    #[inline]
     fn frame_sequencer_edge(&mut self, div_before: u16) {
         let mask = if self.double_speed { 0x2000 } else { 0x1000 };
         if div_before & mask != 0 && self.timer.div_counter() & mask == 0 {
@@ -205,7 +207,11 @@ impl Bus {
         }
     }
 
+    #[inline]
     fn tick_dma(&mut self) {
+        if self.dma.active.is_none() && self.dma.pending.is_none() {
+            return;
+        }
         if let Some((index, src)) = self.dma.active {
             let mut val = self.dma_source_read(src + index as u16);
             if let Some(forced) = self.dma.forced.take() {

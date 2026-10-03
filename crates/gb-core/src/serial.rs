@@ -38,7 +38,11 @@ impl Serial {
 
     /// The divider counter changed from `div_before` to `div_after` (one M-cycle, or a DIV reset).
     /// Returns IF bits to raise.
+    #[inline]
     pub fn clock(&mut self, div_before: u16, div_after: u16) -> u8 {
+        if self.bits_left == 0 {
+            return 0;
+        }
         let bit = if self.cgb && self.sc & 2 != 0 {
             FAST_CLOCK_BIT
         } else {
