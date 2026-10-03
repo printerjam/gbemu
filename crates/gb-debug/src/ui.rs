@@ -48,7 +48,11 @@ pub fn run(session: &mut Session) -> Result<(), String> {
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, s: &mut Session, app: &mut App) -> Result<(), String> {
     while !s.quit {
         terminal.draw(|f| draw(f, s, app)).map_err(|e| e.to_string())?;
-        let wait = if app.running { Duration::ZERO } else { Duration::from_millis(100) };
+        let wait = if app.running {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(100)
+        };
         if event::poll(wait).map_err(|e| e.to_string())? {
             if let Event::Key(k) = event::read().map_err(|e| e.to_string())? {
                 if k.kind != KeyEventKind::Press {
@@ -127,7 +131,11 @@ fn handle_key(code: KeyCode, s: &mut Session, app: &mut App) {
         }
         KeyCode::Char('b') => {
             let on = s.toggle_break(app.cursor);
-            app.say(format!("breakpoint {} at ${:04X}", if on { "set" } else { "cleared" }, app.cursor));
+            app.say(format!(
+                "breakpoint {} at ${:04X}",
+                if on { "set" } else { "cleared" },
+                app.cursor
+            ));
         }
         KeyCode::Char('w') => app.input = Some("watch ".into()),
         KeyCode::Char('g') => app.input = Some("goto ".into()),
@@ -149,7 +157,12 @@ fn run_line(line: &str, s: &mut Session, app: &mut App) {
             app.history.push(line.to_string());
             let moves = matches!(
                 cmd,
-                Command::Step(_) | Command::Next | Command::Frame | Command::Continue(_) | Command::Ret | Command::Set(..)
+                Command::Step(_)
+                    | Command::Next
+                    | Command::Frame
+                    | Command::Continue(_)
+                    | Command::Ret
+                    | Command::Set(..)
             );
             if matches!(cmd, Command::Continue(None)) {
                 app.running = true;
@@ -182,7 +195,11 @@ fn draw(f: &mut Frame, s: &Session, app: &App) {
         .split(rows[0]);
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(30), Constraint::Percentage(25)])
+        .constraints([
+            Constraint::Percentage(45),
+            Constraint::Percentage(30),
+            Constraint::Percentage(25),
+        ])
         .split(cols[0]);
     let right = Layout::default()
         .direction(Direction::Vertical)
@@ -199,16 +216,26 @@ fn draw(f: &mut Frame, s: &Session, app: &App) {
     f.render_widget(Paragraph::new(log).block(block("Log")), left[2]);
 
     let regs: Vec<Line> = s.regs_lines().into_iter().map(Line::raw).collect();
-    f.render_widget(Paragraph::new(regs).block(block(if s.tracing() { "Registers [TRACE]" } else { "Registers" })), right[0]);
+    f.render_widget(
+        Paragraph::new(regs).block(block(if s.tracing() { "Registers [TRACE]" } else { "Registers" })),
+        right[0],
+    );
     draw_screen(f, right[1], s);
     let text = s.serial_text();
     let h = right[2].height.saturating_sub(2) as usize;
     let lines: Vec<&str> = text.lines().collect();
-    let tail: Vec<Line> = lines[lines.len().saturating_sub(h)..].iter().map(|l| Line::raw(*l)).collect();
+    let tail: Vec<Line> = lines[lines.len().saturating_sub(h)..]
+        .iter()
+        .map(|l| Line::raw(*l))
+        .collect();
     f.render_widget(Paragraph::new(tail).block(block("Serial")), right[2]);
 
     let status = match &app.input {
-        Some(i) => Line::from(vec![Span::styled(":", Style::new().fg(Color::Yellow)), Span::raw(i.as_str()), Span::raw("_")]),
+        Some(i) => Line::from(vec![
+            Span::styled(":", Style::new().fg(Color::Yellow)),
+            Span::raw(i.as_str()),
+            Span::raw("_"),
+        ]),
         None if app.running => Line::styled("RUNNING (Space to stop)", Style::new().fg(Color::Green)),
         None => Line::styled(
             "s step  n over  f frame  r ret  Space run  b bp  w watch  g goto  : cmd  ? help  q quit",
@@ -236,7 +263,10 @@ fn draw_disasm(f: &mut Frame, area: Rect, s: &Session, app: &App) {
         lines.push(Line::styled(s.disasm_line(addr), style));
         addr = addr.wrapping_add(s.disasm(addr).1 as u16);
     }
-    f.render_widget(Paragraph::new(lines).block(block("Disassembly (* breakpoint, > PC)")), area);
+    f.render_widget(
+        Paragraph::new(lines).block(block("Disassembly (* breakpoint, > PC)")),
+        area,
+    );
 }
 
 fn draw_memory(f: &mut Frame, area: Rect, s: &Session) {
@@ -270,8 +300,14 @@ fn draw_screen(f: &mut Frame, area: Rect, s: &Session) {
     };
     let pix_rows = pix_rows + pix_rows % 2;
     let sample = |cx: usize, py: usize| -> Color {
-        let (x0, x1) = (cx * SCREEN_WIDTH / cols, ((cx + 1) * SCREEN_WIDTH / cols).max(cx * SCREEN_WIDTH / cols + 1));
-        let (y0, y1) = (py * SCREEN_HEIGHT / pix_rows, ((py + 1) * SCREEN_HEIGHT / pix_rows).max(py * SCREEN_HEIGHT / pix_rows + 1));
+        let (x0, x1) = (
+            cx * SCREEN_WIDTH / cols,
+            ((cx + 1) * SCREEN_WIDTH / cols).max(cx * SCREEN_WIDTH / cols + 1),
+        );
+        let (y0, y1) = (
+            py * SCREEN_HEIGHT / pix_rows,
+            ((py + 1) * SCREEN_HEIGHT / pix_rows).max(py * SCREEN_HEIGHT / pix_rows + 1),
+        );
         let (mut sum, mut n) = (0u32, 0u32);
         for y in y0..y1.min(SCREEN_HEIGHT) {
             for x in x0..x1.min(SCREEN_WIDTH) {
@@ -286,7 +322,9 @@ fn draw_screen(f: &mut Frame, area: Rect, s: &Session) {
     let lines: Vec<Line> = (0..pix_rows / 2)
         .map(|row| {
             let mut spans = vec![Span::raw(" ".repeat(x_off))];
-            spans.extend((0..cols).map(|cx| Span::styled("▀", Style::new().fg(sample(cx, row * 2)).bg(sample(cx, row * 2 + 1)))));
+            spans.extend(
+                (0..cols).map(|cx| Span::styled("▀", Style::new().fg(sample(cx, row * 2)).bg(sample(cx, row * 2 + 1)))),
+            );
             Line::from(spans)
         })
         .collect();

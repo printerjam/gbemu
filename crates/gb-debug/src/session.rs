@@ -13,7 +13,12 @@ use std::io::{BufWriter, Write};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stop {
     Breakpoint(u16),
-    Watch { addr: u16, old: u8, new: u8, pc: u16 },
+    Watch {
+        addr: u16,
+        old: u8,
+        new: u8,
+        pc: u16,
+    },
     /// The requested step/next/ret/frame completed.
     Done,
     /// Cycle budget exhausted without hitting anything.
@@ -105,7 +110,9 @@ impl Session {
     /// One formatted disassembly line, with breakpoint / PC markers.
     pub fn disasm_line(&self, addr: u16) -> String {
         let (text, len) = self.disasm(addr);
-        let bytes: Vec<String> = (0..len as u16).map(|i| format!("{:02X}", self.peek(addr.wrapping_add(i)))).collect();
+        let bytes: Vec<String> = (0..len as u16)
+            .map(|i| format!("{:02X}", self.peek(addr.wrapping_add(i))))
+            .collect();
         let bp = if self.breaks.contains(&addr) { '*' } else { ' ' };
         let cur = if addr == self.pc() { '>' } else { ' ' };
         format!("{bp}{cur}{addr:04X}  {:<8} {text}", bytes.join(" "))
@@ -153,7 +160,9 @@ impl Session {
             format!("SP {:04X}  PC {:04X}  flags {}", r.sp, r.pc, flags(r.f)),
             format!(
                 "IME {}  HALT {}  cycles {}",
-                self.gb.cpu.ime as u8, self.gb.cpu.halted as u8, self.gb.cycles()
+                self.gb.cpu.ime as u8,
+                self.gb.cpu.halted as u8,
+                self.gb.cycles()
             ),
             format!(
                 "LY {:02X}  STAT {:02X}  LCDC {:02X}  IF {:02X}  IE {:02X}",
@@ -172,7 +181,10 @@ impl Session {
                 let base = addr.wrapping_add(row * 16);
                 let bytes: Vec<u8> = (0..16u16).map(|i| self.peek(base.wrapping_add(i))).collect();
                 let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
-                let asc: String = bytes.iter().map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { '.' }).collect();
+                let asc: String = bytes
+                    .iter()
+                    .map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { '.' })
+                    .collect();
                 format!("{base:04X}  {} {}  {asc}", hex[..8].join(" "), hex[8..].join(" "))
             })
             .collect()
@@ -209,7 +221,11 @@ impl Session {
         let start = self.gb.cycles();
         loop {
             if self.gb.cycles() - start >= budget {
-                return if matches!(goal, Goal::Frame) { Stop::Done } else { Stop::Cap };
+                return if matches!(goal, Goal::Frame) {
+                    Stop::Done
+                } else {
+                    Stop::Cap
+                };
             }
             let sp_before = self.gb.cpu.regs.sp;
             let pc_before = self.pc();
@@ -218,7 +234,12 @@ impl Session {
             for (&addr, old) in self.watches.iter_mut() {
                 let new = self.gb.bus.peek(addr);
                 if new != *old {
-                    let stop = Stop::Watch { addr, old: *old, new, pc: pc_before };
+                    let stop = Stop::Watch {
+                        addr,
+                        old: *old,
+                        new,
+                        pc: pc_before,
+                    };
                     *old = new;
                     // Refresh the remaining watches so one stop reports one change set.
                     return self.refresh_watches(stop);
@@ -269,12 +290,17 @@ impl Session {
             _ if op & 0xC7 == 0xC7 => 1,
             _ => return self.step(),
         };
-        let goal = Goal::Over { target: pc.wrapping_add(len), sp: self.gb.cpu.regs.sp };
+        let goal = Goal::Over {
+            target: pc.wrapping_add(len),
+            sp: self.gb.cpu.regs.sp,
+        };
         self.exec(goal, LONG_CAP)
     }
 
     pub fn run_to_ret(&mut self) -> Stop {
-        let goal = Goal::Ret { sp: self.gb.cpu.regs.sp };
+        let goal = Goal::Ret {
+            sp: self.gb.cpu.regs.sp,
+        };
         self.exec(goal, LONG_CAP)
     }
 
@@ -283,11 +309,16 @@ impl Session {
     }
 
     pub fn describe(&self, stop: &Stop) -> String {
-        let at = format!("{}", self.disasm_line(self.pc()).trim_start_matches([' ', '*', '>']));
+        let at = self
+            .disasm_line(self.pc())
+            .trim_start_matches([' ', '*', '>'])
+            .to_string();
         match stop {
             Stop::Breakpoint(a) => format!("breakpoint hit at ${a:04X}: {at}"),
             Stop::Watch { addr, old, new, pc } => {
-                format!("watch ${addr:04X} changed {old:02X} -> {new:02X} (written by instruction at ${pc:04X}) next: {at}")
+                format!(
+                    "watch ${addr:04X} changed {old:02X} -> {new:02X} (written by instruction at ${pc:04X}) next: {at}"
+                )
             }
             Stop::Done => format!("stopped: {at}"),
             Stop::Cap => format!("cycle budget exhausted: {at}"),
@@ -423,7 +454,11 @@ impl Session {
             Command::Serial => vec![self.serial_text()],
             Command::Breaks => {
                 let mut v: Vec<String> = self.breaks.iter().map(|a| format!("break ${a:04X}")).collect();
-                v.extend(self.watches.iter().map(|(a, val)| format!("watch ${a:04X} (={val:02X})")));
+                v.extend(
+                    self.watches
+                        .iter()
+                        .map(|(a, val)| format!("watch ${a:04X} (={val:02X})")),
+                );
                 if v.is_empty() {
                     v.push("no breakpoints or watches".into());
                 }

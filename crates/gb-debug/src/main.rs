@@ -34,7 +34,10 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
-    let gb = match std::fs::read(&rom).map_err(|e| e.to_string()).and_then(|d| GameBoy::new(d).map_err(|e| format!("{e:?}"))) {
+    let gb = match std::fs::read(&rom)
+        .map_err(|e| e.to_string())
+        .and_then(|d| GameBoy::new(d).map_err(|e| format!("{e:?}")))
+    {
         Ok(gb) => gb,
         Err(e) => {
             eprintln!("gbdbg: {rom}: {e}");

@@ -139,7 +139,11 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
             let (r, v) = joined
                 .split_once('=')
                 .map(|(r, v)| (r.trim().to_string(), v.trim().to_string()))
-                .or_else(|| joined.split_once(' ').map(|(r, v)| (r.to_string(), v.trim().to_string())))
+                .or_else(|| {
+                    joined
+                        .split_once(' ')
+                        .map(|(r, v)| (r.to_string(), v.trim().to_string()))
+                })
                 .ok_or("usage: set REG=VALUE")?;
             let reg = parse_reg(&r)?;
             let val = parse_num(&v)?;
@@ -152,7 +156,10 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "poke" => {
             need(2)?;
             let v = parse_num(args[1])?;
-            Command::Poke(addr(args[0])?, u8::try_from(v).map_err(|_| "poke value must fit a byte")?)
+            Command::Poke(
+                addr(args[0])?,
+                u8::try_from(v).map_err(|_| "poke value must fit a byte")?,
+            )
         }
         "trace" => match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
             Some("on") => Command::Trace(Some(args.get(1).copied().unwrap_or("trace.log").to_string())),
@@ -167,11 +174,13 @@ pub fn parse(line: &str) -> Result<Option<Command>, String> {
         "regs" | "reg" => Command::Regs,
         "x" | "mem" => Command::Examine(
             args.first().map(|a| addr(a)).transpose()?,
-            args.get(1).map_or(Ok(64), |a| parse_num(a).map(|n| n.min(0x10000) as u16))?,
+            args.get(1)
+                .map_or(Ok(64), |a| parse_num(a).map(|n| n.min(0x10000) as u16))?,
         ),
         "dis" | "disasm" => Command::Disasm(
             args.first().map(|a| addr(a)).transpose()?,
-            args.get(1).map_or(Ok(8), |a| parse_num(a).map(|n| n.min(1000) as u16))?,
+            args.get(1)
+                .map_or(Ok(8), |a| parse_num(a).map(|n| n.min(1000) as u16))?,
         ),
         "goto" | "g" => {
             need(1)?;
