@@ -2,11 +2,13 @@
 //! Transmitted bytes are recorded so test ROMs (blargg) can report over serial.
 
 use crate::irq;
+use serde::{Deserialize, Serialize};
 
 /// The internal serial clock (8192 Hz) is DIV-counter bit 8: one bit is shifted on each falling edge
 /// (512 T-cycles), so a transfer started mid-period is aligned to the divider.
 const CLOCK_BIT: u16 = 0x100;
 
+#[derive(Serialize, Deserialize)]
 pub struct Serial {
     sb: u8,
     sc: u8,

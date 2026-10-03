@@ -9,7 +9,9 @@ use crate::oam_bug;
 use crate::ppu::Ppu;
 use crate::serial::Serial;
 use crate::timer::Timer;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 struct Dma {
     /// Last value written to 0xFF46.
     reg: u8,
@@ -19,6 +21,7 @@ struct Dma {
     pending: Option<(u8, u16)>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Bus {
     pub cart: Cartridge,
     pub ppu: Ppu,
@@ -26,7 +29,9 @@ pub struct Bus {
     pub timer: Timer,
     pub serial: Serial,
     pub joypad: Joypad,
+    #[serde(with = "crate::state::boxed_bytes")]
     wram: Box<[u8; 0x2000]>,
+    #[serde(with = "crate::state::bytes")]
     hram: [u8; 0x7F],
     /// IF (0xFF0F), low 5 bits.
     pub int_flag: u8,

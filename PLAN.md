@@ -17,7 +17,7 @@ crates; I/O crates (minifb, cpal, png) only in frontends/tools.
 | `crates/gb-core` | — | Emulation core. No deps, no I/O, wasm-friendly. |
 | `crates/gb-runner` | `gbtest` | Headless test-ROM runner, scoreboard, screenshots. |
 | `crates/gb-desktop` | `gbemu` | minifb window + cpal audio frontend. |
-| later: `gb-term`, `gb-wasm` | | Terminal renderer, browser build. |
+| `crates/gb-wasm` | — | wasm-bindgen cdylib wrapping `GameBoy` for the browser page in `web/`. |
 
 ## Core contracts (gb-core)
 
@@ -49,6 +49,17 @@ mooneye timing tests check.
 - `GameBoy` (gameboy.rs) is the frontend API: `new(rom)`, `step`,
   `run_frame`, `framebuffer`, `set_button`, `registers`, `cycles`,
   `serial_output`, `set_sample_rate`, `drain_audio`, `cartridge(_mut)`.
+- Save states (`state.rs`): `GameBoy::save_state() -> Vec<u8>` /
+  `load_state(&[u8]) -> Result<(), StateError>` (bincode payload behind a
+  `GBST` header: version, ROM header+global checksum, ROM length, CRC-32).
+  **Every stateful core struct derives `Serialize`/`Deserialize`; new fields
+  must be serializable** (arrays > 32 bytes use `#[serde(with =
+  "crate::state::bytes")]` / `boxed_bytes`; ROM bytes and host settings such as
+  the DMG palette and audio sample rate are `serde(skip)` and restored from the
+  running machine). Bump `STATE_VERSION` whenever the layout changes.
+- Rewind (`rewind.rs`): `Rewind::{frame(&gb), push, pop_into(&mut gb), clear, len}` keeps a bounded ring of
+  snapshots (newest in full, older ones as XOR + zero-run-length deltas of the raw bincode payload; the payload
+  uses fixed-width integers precisely so consecutive snapshots stay byte-aligned). About 0.5 KB and 40 us per snapshot.
 - No boot ROM: machine starts in documented DMG-ABC post-boot state
   (A=01 F=B0 BC=0013 DE=00D8 HL=014D SP=FFFE PC=0100, DIV counter 0xABCC).
 - DMG palette in framebuffer is exactly FFFFFF/AAAAAA/555555/000000 so
@@ -80,6 +91,28 @@ mooneye timing tests check.
 9. WASM build (browser page).
 
 Stretch: mooneye timing tests to 100%, FIFO PPU + mealybug, debugger TUI, rewind.
+
+## Browser build (`crates/gb-wasm` + `web/`)
+
+Homebrew's rustc has no `wasm32` std, so the wasm build uses a separate rustup toolchain that lives in
+`~/.cargo/bin` (not on the default PATH; Homebrew's `cargo` keeps building everything else). One-time setup:
+
+```sh
+curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+    --default-toolchain stable -t wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129 --locked   # must equal the wasm-bindgen crate version
+```
+
+`scripts/build-web.sh` (add `--serve [PORT]` to also serve `web/`) builds `-p gb-wasm` with the `web` profile
+(opt-level 3, fat LTO, panic=abort) and runs `wasm-bindgen --target web` into `web/pkg/` (git-ignored). The page is
+plain ES modules, no bundler: ROM picker/drag&drop, canvas scaled with `image-rendering: pixelated`, keyboard +
+touch pad, AudioWorklet output (ScriptProcessor fallback on insecure origins), 59.7275 Hz accumulator pacing,
+battery saves and save states in `localStorage` keyed by `title:fnv1a(rom)`, palette select. AudioWorklet needs
+a secure context (`localhost` counts).
+
+`.github/workflows/pages.yml` publishes `web/` to GitHub Pages on every push to `main`: stable toolchain +
+wasm32 target, `wasm-bindgen-cli` installed at the version read from `Cargo.lock` (cached), then the same
+`scripts/build-web.sh`. In the repo settings, Pages source must be set to "GitHub Actions".
 
 ## Workflow
 

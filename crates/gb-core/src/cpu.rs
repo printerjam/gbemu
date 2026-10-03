@@ -2,6 +2,8 @@
 //! rest of the machine by one M-cycle per access, so instruction timing falls
 //! out of the access pattern.
 
+use serde::{Deserialize, Serialize};
+
 /// What the CPU sees of the machine. Implemented by [`crate::bus::Bus`];
 /// tests may implement it with a flat-memory mock.
 pub trait CpuBus {
@@ -27,7 +29,7 @@ pub trait CpuBus {
     fn ack_interrupt(&mut self, mask: u8);
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registers {
     pub a: u8,
     pub f: u8,
@@ -64,6 +66,7 @@ const FN: u8 = 0x40;
 const FH: u8 = 0x20;
 const FC: u8 = 0x10;
 
+#[derive(Serialize, Deserialize)]
 pub struct Cpu {
     pub regs: Registers,
     pub ime: bool,
