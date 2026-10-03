@@ -36,8 +36,8 @@ struct Hdma {
 /// Internal divider value when the CGB boot ROM hands over (mooneye boot_div-cgbABCDE).
 const CGB_POST_BOOT_DIV: u16 = 0x2674;
 
-/// M-cycles a speed switch keeps the CPU stopped.
-const SPEED_SWITCH_M_CYCLES: u32 = 2050;
+/// M-cycles a speed switch keeps the CPU stopped: 2^17 CPU clocks in either direction (age-cgb spsw-tima).
+const SPEED_SWITCH_M_CYCLES: u32 = 0x8000;
 
 #[derive(Serialize, Deserialize)]
 pub struct Bus {
@@ -308,7 +308,8 @@ impl Bus {
         self.key1_armed = false;
         self.double_speed = !self.double_speed;
         self.ds_phase = false;
-        self.poke(0xFF04, 0);
+        self.timer.reset_div_speed_switch();
+        self.int_flag |= self.timer.take_write_irq();
         for _ in 0..SPEED_SWITCH_M_CYCLES {
             self.tick_cycle();
         }
