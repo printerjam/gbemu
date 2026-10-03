@@ -31,12 +31,44 @@ const DUTY: [[u8; 8]; 4] = [
 struct Envelope {
     volume: u8,
     timer: u8,
+    /// Still doing automatic updates (cleared when the volume reaches its limit).
+    active: bool,
 }
 
 impl Envelope {
     fn trigger(&mut self, nrx2: u8) {
         self.volume = nrx2 >> 4;
         self.timer = Self::period(nrx2);
+        self.active = true;
+    }
+    /// NRx2 written while the channel plays ("zombie mode"): the volume is bumped depending on the old value.
+    fn zombie_write(&mut self, old: u8, new: u8, cgb: bool) {
+        let mut v = self.volume as i32;
+        let invert = (old ^ new) & 8 != 0;
+        if cgb {
+            let tick = new & 7 != 0 && old & 7 == 0;
+            if invert {
+                // Fitted to SameSuite channel_*_volume: going to add mode costs 1 (2 if the old period was nonzero),
+                // going to subtract mode costs 1 only when the envelope would also have ticked.
+                v = if new & 8 != 0 {
+                    16 - v - if old & 7 == 0 { 1 } else { 2 }
+                } else {
+                    16 - v - tick as i32
+                };
+            } else if tick || (new & 0xF == 8 && old & 0xF == 8) {
+                v += if new & 8 != 0 { 1 } else { -1 };
+            }
+        } else {
+            if old & 7 == 0 && self.active {
+                v += 1;
+            } else if old & 8 == 0 {
+                v += 2;
+            }
+            if invert {
+                v = 16 - v;
+            }
+        }
+        self.volume = (v & 15) as u8;
     }
     fn period(nrx2: u8) -> u8 {
         match nrx2 & 7 {
@@ -55,8 +87,12 @@ impl Envelope {
                 if self.volume < 15 {
                     self.volume += 1;
                 }
-            } else if self.volume > 0 {
-                self.volume -= 1;
+                self.active = self.volume < 15;
+            } else {
+                if self.volume > 0 {
+                    self.volume -= 1;
+                }
+                self.active = self.volume > 0;
             }
         }
     }
@@ -605,6 +641,13 @@ impl Apu {
                 self.ch4_len = 64 - (val & 63) as u16;
             }
             0x02 | 0x07 | 0x11 => {
+                let old = self.regs[i];
+                match i {
+                    0x02 if self.ch1.enabled => self.ch1.env.zombie_write(old, val, self.cgb),
+                    0x07 if self.ch2.enabled => self.ch2.env.zombie_write(old, val, self.cgb),
+                    0x11 if self.ch4_enabled => self.ch4_env.zombie_write(old, val, self.cgb),
+                    _ => {}
+                }
                 self.regs[i] = val;
                 if val & 0xF8 == 0 {
                     match i {
