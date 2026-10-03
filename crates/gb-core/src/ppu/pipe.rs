@@ -57,6 +57,15 @@ struct Pending {
     x: u8,
     /// Dot (`cyc`) at which the pixel is mixed.
     due: u16,
+    /// LCDC.0 / LCDC.1 are sampled at their own dots (`bg_en_due` / `obj_en_due`).
+    bg_en_due: u16,
+    obj_en_due: u16,
+    bg_en: bool,
+    obj_en: bool,
+}
+
+fn env_delay(name: &str, default: u16) -> u16 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -90,6 +99,9 @@ pub(super) struct Pipe {
     stall: u8,
     wait: u8,
     group: (u8, u8),
+    /// A sprite stall ended since the last BG push: the next tile fetch starts late.
+    post_sprite: bool,
+    fetch_hold: u8,
     /// Popped pixels waiting for their palette lookup (`MIX_DELAY` dots after the pop).
     delay: [Pending; 8],
     delay_head: u8,
@@ -119,6 +131,16 @@ impl Ppu {
     fn mix_due(&mut self) {
         if self.pipe.delay_len == 0 {
             return;
+        }
+        let lcdc = self.regs[LCDC];
+        for k in 0..self.pipe.delay_len as usize {
+            let e = &mut self.pipe.delay[(self.pipe.delay_head as usize + k) & 7];
+            if e.bg_en_due == self.pipe.cyc {
+                e.bg_en = lcdc & 1 != 0;
+            }
+            if e.obj_en_due == self.pipe.cyc {
+                e.obj_en = lcdc & 2 != 0;
+            }
         }
         let head = self.pipe.delay[self.pipe.delay_head as usize];
         if head.due > self.pipe.cyc {
@@ -184,6 +206,7 @@ impl Ppu {
                 return;
             }
             self.merge_sprites();
+            self.pipe.post_sprite = true;
             self.pop();
             return;
         }
@@ -198,19 +221,35 @@ impl Ppu {
     }
 
     fn fetch_step(&mut self, push: bool) {
+        if self.pipe.fetch_hold > 0 {
+            self.pipe.fetch_hold -= 1;
+            return;
+        }
         if self.pipe.prog < FETCH_STEPS {
             self.pipe.prog += 1;
-            match self.pipe.prog {
-                2 => self.fetch_tile_index(),
-                4 => self.pipe.lo = self.vram[self.fetch_addr()],
-                6 => self.pipe.hi = self.vram[self.fetch_addr() + 1],
-                _ => {}
+            let (ti, lo, hi) = (
+                env_delay("GB_TI", 4) as u8,
+                env_delay("GB_LO", 4) as u8,
+                env_delay("GB_HI", 6) as u8,
+            );
+            if self.pipe.prog == ti {
+                self.fetch_tile_index();
+            }
+            if self.pipe.prog == lo {
+                self.pipe.lo = self.vram[self.fetch_addr()];
+            }
+            if self.pipe.prog == hi {
+                self.pipe.hi = self.vram[self.fetch_addr() + 1];
             }
         }
         if push && self.pipe.prog >= FETCH_STEPS && self.pipe.bg_len == 0 {
             self.push_row();
             self.pipe.prog = 1;
             self.pipe.k = self.pipe.k.wrapping_add(1);
+            if self.pipe.post_sprite {
+                self.pipe.post_sprite = false;
+                self.pipe.fetch_hold = env_delay("GB_HOLD", 0) as u8;
+            }
         }
     }
 
@@ -366,6 +405,10 @@ impl Ppu {
             obj,
             x,
             due: p.cyc + MIX_DELAY,
+            bg_en_due: p.cyc + env_delay("GB_BGEN", 6),
+            obj_en_due: p.cyc + env_delay("GB_OBJEN", 6),
+            bg_en: true,
+            obj_en: true,
         };
         p.delay_len += 1;
         if self.pipe.cx == self.pipe.pixels_end() {
@@ -383,10 +426,10 @@ impl Ppu {
         let (bg, obj) = (e.bg, e.obj);
         let lcdc = self.regs[LCDC];
         let cgb = self.cgb_mode();
-        let bg_id = if !cgb && lcdc & 1 == 0 { 0 } else { bg.color };
-        let obj_visible = lcdc & 0x02 != 0 && obj.color != 0;
+        let bg_id = if !cgb && !e.bg_en { 0 } else { bg.color };
+        let obj_visible = e.obj_en && obj.color != 0;
         let bg_wins = if cgb {
-            lcdc & 1 != 0 && (obj.flags & 0x80 != 0 || bg.attr & 0x80 != 0)
+            e.bg_en && (obj.flags & 0x80 != 0 || bg.attr & 0x80 != 0)
         } else {
             obj.flags & 0x80 != 0
         };
