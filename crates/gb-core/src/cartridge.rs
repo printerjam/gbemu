@@ -1,5 +1,6 @@
 //! Cartridge: header parsing and memory bank controllers (ROM-only, MBC1/1M, MBC2, MBC3+RTC, MBC5).
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +21,7 @@ impl fmt::Display for CartError {
 impl std::error::Error for CartError {}
 
 /// Parsed cartridge header (0x0100..0x0150).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Header {
     pub title: String,
     /// 0x143: 0x80 = CGB-enhanced, 0xC0 = CGB-only.
@@ -95,8 +96,9 @@ impl Header {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Kind {
+    #[default]
     None,
     Mbc1,
     Mbc2,
@@ -108,7 +110,7 @@ const M_CYCLES_PER_SECOND: u32 = 1_048_576;
 const RTC_FOOTER_LEN: usize = 48;
 
 /// MBC3 real-time clock registers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct RtcRegs {
     s: u8,
     m: u8,
@@ -189,7 +191,7 @@ impl RtcRegs {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Rtc {
     live: RtcRegs,
     latched: RtcRegs,
@@ -201,15 +203,24 @@ struct Rtc {
     unix_time: u64,
 }
 
+/// Fields marked `serde(skip)` are fixed by the ROM; a loaded state takes them from the running cartridge.
+#[derive(Serialize, Deserialize)]
 pub struct Cartridge {
+    #[serde(skip)]
     header: Header,
+    #[serde(skip)]
     kind: Kind,
+    #[serde(skip)]
     rom: Vec<u8>,
     ram: Vec<u8>,
+    #[serde(skip)]
     battery: bool,
+    #[serde(skip)]
     rumble: bool,
+    #[serde(skip)]
     multicart: bool,
     /// Number of 16 KiB ROM banks rounded up to a power of two, minus one.
+    #[serde(skip)]
     rom_mask: usize,
     ram_enabled: bool,
     /// MBC1: BANK1 (5 bit). MBC2/MBC3/MBC5: ROM bank register (low bits).
@@ -278,6 +289,27 @@ impl Cartridge {
             mode: false,
             rtc: timer.then(Rtc::default),
         })
+    }
+
+    /// The (bank-padded) ROM image.
+    pub fn rom_bytes(&self) -> &[u8] {
+        &self.rom
+    }
+
+    /// Complete a deserialized cartridge (which carries only mutable state) with the ROM-derived fields of
+    /// `loaded`, taking its ROM. Returns false, leaving both untouched, if the RAM size does not match.
+    pub(crate) fn adopt_rom_from(&mut self, loaded: &mut Cartridge) -> bool {
+        if self.ram.len() != loaded.ram.len() || self.rtc.is_some() != loaded.rtc.is_some() {
+            return false;
+        }
+        self.header = std::mem::take(&mut loaded.header);
+        self.kind = loaded.kind;
+        self.rom = std::mem::take(&mut loaded.rom);
+        self.battery = loaded.battery;
+        self.rumble = loaded.rumble;
+        self.multicart = loaded.multicart;
+        self.rom_mask = loaded.rom_mask;
+        true
     }
 
     pub fn header(&self) -> &Header {
