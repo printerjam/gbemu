@@ -42,10 +42,10 @@ impl Registers {
             f: 0x80,
             b: 0x00,
             c: 0x00,
-            d: if cgb_game { 0x00 } else { 0xFF },
-            e: if cgb_game { 0x08 } else { 0x56 },
+            d: if cgb_game { 0xFF } else { 0x00 },
+            e: if cgb_game { 0x56 } else { 0x08 },
             h: 0x00,
-            l: if cgb_game { 0x7C } else { 0x0D },
+            l: if cgb_game { 0x0D } else { 0x7C },
             sp: 0xFFFE,
             pc: 0x0100,
         }

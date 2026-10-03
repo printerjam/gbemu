@@ -170,6 +170,8 @@ impl Ppu {
             obj_rgb: [0x00FF_FFFF; 32],
             hblank_event: false,
         };
+        ppu.bcps = 0x88;
+        ppu.ocps = 0x90;
         if compat {
             ppu.opri = 1;
             for pal in 0..2 {
@@ -210,9 +212,9 @@ impl Ppu {
         self.lcd_on() && self.mode == 3
     }
 
-    /// True while the visible mode is 0 on a line < 144 (HDMA may transfer).
+    /// True while HDMA may start a block right away: HBlank on a visible line, or LCD off.
     pub fn in_hblank(&self) -> bool {
-        self.lcd_on() && self.mode == 0 && self.ly < 144 && !self.first_line
+        !self.lcd_on() || (self.mode == 0 && self.ly < 144 && !self.first_line)
     }
 
     /// True once per entry into HBlank on a visible line; clears the flag.
@@ -314,6 +316,10 @@ impl Ppu {
             }
             if self.ly < 144 {
                 self.oam_read_lock = true;
+            }
+            if self.cgb && self.ly == 144 {
+                // CGB: the mode-2 STAT source of line 144 fires one M-cycle before VBlank.
+                self.vblank_oam_irq = true;
             }
         } else if self.dot == LINE_PREFIX {
             if self.ly < 144 {
@@ -607,7 +613,7 @@ impl Ppu {
             0xFF4F => return if self.cgb { 0xFE | self.vbk } else { 0xFF },
             0xFF68 => return if self.cgb { 0x40 | self.bcps } else { 0xFF },
             0xFF6A => return if self.cgb { 0x40 | self.ocps } else { 0xFF },
-            0xFF69 | 0xFF6B if self.cgb => {
+            0xFF69 | 0xFF6B if self.cgb_mode() => {
                 let (ram, ps) = if addr == 0xFF69 {
                     (&self.bg_pal, self.bcps)
                 } else {
@@ -705,7 +711,7 @@ impl Ppu {
             0xFF4F => self.vbk = val & 1,
             0xFF68 => self.bcps = val & 0xBF,
             0xFF6A => self.ocps = val & 0xBF,
-            0xFF69 | 0xFF6B => {
+            0xFF69 | 0xFF6B if self.cgb_mode() => {
                 let obj = addr == 0xFF6B;
                 let ps = if obj { self.ocps } else { self.bcps };
                 let idx = (ps & 0x3F) as usize;
@@ -728,7 +734,7 @@ impl Ppu {
                     }
                 }
             }
-            0xFF6C => self.opri = val & 1,
+            0xFF6C if self.cgb_mode() => self.opri = val & 1,
             _ => {}
         }
     }

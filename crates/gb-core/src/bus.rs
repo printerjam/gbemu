@@ -29,6 +29,9 @@ struct Hdma {
     active: bool,
 }
 
+/// Internal divider value when the CGB boot ROM hands over (mooneye boot_div-cgbABCDE).
+const CGB_POST_BOOT_DIV: u16 = 0x2674;
+
 /// M-cycles a speed switch keeps the CPU stopped.
 const SPEED_SWITCH_M_CYCLES: u32 = 2050;
 
@@ -70,7 +73,9 @@ impl Bus {
     /// CGB hardware; the cartridge decides between CGB mode and DMG compatibility mode.
     pub fn new_cgb(cart: Cartridge) -> Self {
         let ppu = Ppu::new_cgb(cart.header().cgb_supported());
-        Self::with_ppu(cart, ppu, true)
+        let mut bus = Self::with_ppu(cart, ppu, true);
+        bus.timer = Timer::with_div(CGB_POST_BOOT_DIV);
+        bus
     }
 
     pub fn model(&self) -> Model {
@@ -199,7 +204,9 @@ impl Bus {
 
     fn write_hdma_control(&mut self, val: u8) {
         if self.hdma.active && val & 0x80 == 0 {
+            // Cancel; the length bits take the written value.
             self.hdma.active = false;
+            self.hdma.len = val & 0x7F;
             return;
         }
         self.hdma.len = val & 0x7F;
@@ -229,33 +236,41 @@ impl Bus {
         if !self.cgb {
             return 0xFF;
         }
+        let cgb_mode = self.cgb_mode();
         match addr {
-            0xFF4D => 0x7E | (self.double_speed as u8) << 7 | self.key1_armed as u8,
             0xFF4F | 0xFF68..=0xFF6C => self.ppu.read_reg(addr),
+            0xFF72 | 0xFF73 => self.undoc[(addr - 0xFF72) as usize],
+            0xFF75 => 0x8F | self.undoc[3],
+            0xFF76 | 0xFF77 => 0x00,
+            // Unmapped in DMG compatibility mode.
+            _ if !cgb_mode => 0xFF,
+            0xFF4D => 0x7E | (self.double_speed as u8) << 7 | self.key1_armed as u8,
             0xFF55 => (!self.hdma.active as u8) << 7 | self.hdma.len,
             0xFF56 => self.rp | 0x3E,
             0xFF70 => 0xF8 | self.svbk,
-            0xFF72 | 0xFF73 => self.undoc[(addr - 0xFF72) as usize],
-            0xFF74 if !self.ppu_compat() => self.undoc[2],
-            0xFF75 => 0x8F | self.undoc[3],
-            0xFF76 | 0xFF77 => 0x00,
+            0xFF74 => self.undoc[2],
             _ => 0xFF,
         }
     }
 
-    fn ppu_compat(&self) -> bool {
-        !self.cart.header().cgb_supported()
+    /// CGB hardware with a CGB cartridge (as opposed to DMG compatibility mode).
+    fn cgb_mode(&self) -> bool {
+        self.cgb && self.cart.header().cgb_supported()
     }
 
     fn cgb_write(&mut self, addr: u16, val: u8) {
         if !self.cgb {
             return;
         }
+        let cgb_mode = self.cgb_mode();
         match addr {
-            0xFF4D => self.key1_armed = val & 1 != 0,
             0xFF4F | 0xFF68..=0xFF6C => {
                 self.ppu.write_reg(addr, val);
             }
+            0xFF72 | 0xFF73 => self.undoc[(addr - 0xFF72) as usize] = val,
+            0xFF75 => self.undoc[3] = val & 0x70,
+            _ if !cgb_mode => {}
+            0xFF4D => self.key1_armed = val & 1 != 0,
             0xFF51 => self.hdma.src = (self.hdma.src & 0x00FF) | (val as u16) << 8,
             0xFF52 => self.hdma.src = (self.hdma.src & 0xFF00) | (val & 0xF0) as u16,
             0xFF53 => self.hdma.dst = (self.hdma.dst & 0x00FF) | ((val & 0x1F) as u16) << 8,
@@ -263,9 +278,7 @@ impl Bus {
             0xFF55 => self.write_hdma_control(val),
             0xFF56 => self.rp = val & 0xC1,
             0xFF70 => self.svbk = val & 7,
-            0xFF72 | 0xFF73 => self.undoc[(addr - 0xFF72) as usize] = val,
-            0xFF74 if !self.ppu_compat() => self.undoc[2] = val,
-            0xFF75 => self.undoc[3] = val & 0x70,
+            0xFF74 => self.undoc[2] = val,
             _ => {}
         }
     }
