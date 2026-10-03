@@ -38,8 +38,11 @@ struct Hdma {
 /// Internal divider value when the CGB boot ROM hands over (mooneye boot_div-cgbABCDE).
 const CGB_POST_BOOT_DIV: u16 = 0x2674;
 
-/// M-cycles a speed switch keeps the CPU stopped.
-const SPEED_SWITCH_M_CYCLES: u32 = 2050;
+/// Dots before the end of a line after which enabling HDMA no longer catches that line's HBlank.
+const HDMA_ENABLE_CUTOFF: u16 = 3;
+
+/// M-cycles a speed switch keeps the CPU stopped: 2^17 CPU clocks in either direction (age-cgb spsw-tima).
+const SPEED_SWITCH_M_CYCLES: u32 = 0x8000;
 
 #[derive(Serialize, Deserialize)]
 pub struct Bus {
@@ -65,6 +68,8 @@ pub struct Bus {
     /// Alternates in double speed so the cartridge clock runs every second M-cycle.
     ds_phase: bool,
     hdma: Hdma,
+    /// HBlank started during the current M-cycle; the block runs once its access is done.
+    hdma_due: bool,
     /// FF56 (infrared port) and FF72-FF75 scratch registers.
     rp: u8,
     undoc: [u8; 4],
@@ -122,6 +127,7 @@ impl Bus {
             double_speed: false,
             key1_armed: false,
             ds_phase: false,
+            hdma_due: false,
             hdma: Hdma {
                 src: 0,
                 dst: 0,
@@ -147,9 +153,19 @@ impl Bus {
     /// HBlank DMA block steal the bus.
     pub fn tick_m(&mut self) {
         self.tick_cycle();
-        let hblank = self.ppu.take_hblank();
-        if hblank && self.hdma.active {
-            self.hdma_block();
+        if self.ppu.take_hblank() && self.hdma.active {
+            self.hdma_due = true;
+        }
+    }
+
+    /// An HBlank DMA block that became due during the M-cycle just executed takes the bus now, after the
+    /// CPU's own access of that cycle (it never sees the transferred data early).
+    fn finish_cycle(&mut self) {
+        if self.hdma_due {
+            self.hdma_due = false;
+            if self.hdma.active {
+                self.hdma_block(true);
+            }
         }
     }
 
@@ -214,7 +230,7 @@ impl Bus {
 
     /// Copy one 16-byte HDMA/GDMA block. The CPU is stalled for 8 M-cycles
     /// (16 in double speed) while the PPU and timers keep running.
-    fn hdma_block(&mut self) {
+    fn hdma_block(&mut self, trailing_cycle: bool) {
         let m_cycles = if self.double_speed { 16 } else { 8 };
         for i in 0..m_cycles {
             self.tick_cycle();
@@ -231,6 +247,10 @@ impl Bus {
         if self.hdma.len == 0x7F {
             self.hdma.active = false;
         }
+        if trailing_cycle {
+            // The transfer unit hands the bus back one M-cycle after the last byte (gambatte dma()).
+            self.tick_cycle();
+        }
         self.ppu.take_hblank();
     }
 
@@ -245,12 +265,13 @@ impl Bus {
         if val & 0x80 == 0 {
             self.hdma.active = true;
             while self.hdma.active {
-                self.hdma_block();
+                self.hdma_block(self.hdma.len == 0);
             }
         } else {
             self.hdma.active = true;
-            if self.ppu.in_hblank() {
-                self.hdma_block();
+            // Enabling right at the end of HBlank misses it: the next line's HBlank starts the transfer.
+            if self.ppu.in_hblank() && self.ppu.dot() + HDMA_ENABLE_CUTOFF < 456 {
+                self.hdma_block(true);
             }
         }
     }
@@ -323,7 +344,8 @@ impl Bus {
         self.key1_armed = false;
         self.double_speed = !self.double_speed;
         self.ds_phase = false;
-        self.poke(0xFF04, 0);
+        self.timer.reset_div_speed_switch();
+        self.int_flag |= self.timer.take_write_irq();
         for _ in 0..SPEED_SWITCH_M_CYCLES {
             self.tick_cycle();
         }
@@ -460,13 +482,17 @@ impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Read);
-        self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr))
+        let v = self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr));
+        self.finish_cycle();
+        v
     }
 
     fn read_idu(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::ReadInc);
-        self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr))
+        let v = self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr));
+        self.finish_cycle();
+        v
     }
 
     fn write(&mut self, addr: u16, val: u8) {
@@ -481,6 +507,7 @@ impl CpuBus for Bus {
         } else {
             self.poke(addr, val);
         }
+        self.finish_cycle();
     }
 
     fn double_speed(&self) -> bool {
@@ -490,10 +517,12 @@ impl CpuBus for Bus {
     fn tick_idu(&mut self, addr: u16) {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Write);
+        self.finish_cycle();
     }
 
     fn tick(&mut self) {
         self.tick_m();
+        self.finish_cycle();
     }
 
     fn stop(&mut self) {

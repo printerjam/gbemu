@@ -232,6 +232,11 @@ impl Ppu {
         !self.lcd_on() || (self.mode == 0 && self.ly < 144 && !self.first_line)
     }
 
+    /// Dot within the current line, 0..456.
+    pub fn dot(&self) -> u16 {
+        self.dot
+    }
+
     /// True once per entry into HBlank on a visible line; clears the flag.
     pub fn take_hblank(&mut self) -> bool {
         std::mem::take(&mut self.hblank_event)
