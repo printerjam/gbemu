@@ -8,6 +8,7 @@ use crate::joypad::Joypad;
 use crate::ppu::Ppu;
 use crate::serial::Serial;
 use crate::timer::Timer;
+use crate::Model;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -20,6 +21,23 @@ struct Dma {
     pending: Option<(u8, u16)>,
 }
 
+/// CGB VRAM DMA (FF51-FF55).
+#[derive(Serialize, Deserialize)]
+struct Hdma {
+    src: u16,
+    dst: u16,
+    /// Blocks remaining minus one (7 bits); 0x7F once finished.
+    len: u8,
+    /// HBlank transfer in progress.
+    active: bool,
+}
+
+/// Internal divider value when the CGB boot ROM hands over (mooneye boot_div-cgbABCDE).
+const CGB_POST_BOOT_DIV: u16 = 0x2674;
+
+/// M-cycles a speed switch keeps the CPU stopped.
+const SPEED_SWITCH_M_CYCLES: u32 = 2050;
+
 #[derive(Serialize, Deserialize)]
 pub struct Bus {
     pub cart: Cartridge,
@@ -28,8 +46,19 @@ pub struct Bus {
     pub timer: Timer,
     pub serial: Serial,
     pub joypad: Joypad,
-    #[serde(with = "crate::state::boxed_bytes")]
-    wram: Box<[u8; 0x2000]>,
+    /// Eight 4 KiB banks; bank 0 at 0xC000, `svbk` (1-7) at 0xD000.
+    wram: Vec<u8>,
+    svbk: u8,
+    cgb: bool,
+    double_speed: bool,
+    /// KEY1 bit 0: speed switch armed for the next STOP.
+    key1_armed: bool,
+    /// Alternates in double speed so DMA/cartridge run every second M-cycle.
+    ds_phase: bool,
+    hdma: Hdma,
+    /// FF56 (infrared port) and FF72-FF75 scratch registers.
+    rp: u8,
+    undoc: [u8; 4],
     #[serde(with = "crate::state::bytes")]
     hram: [u8; 0x7F],
     /// IF (0xFF0F), low 5 bits.
@@ -43,14 +72,52 @@ pub struct Bus {
 
 impl Bus {
     pub fn new(cart: Cartridge) -> Self {
+        Self::with_ppu(cart, Ppu::new(), false)
+    }
+
+    /// CGB hardware; the cartridge decides between CGB mode and DMG compatibility mode.
+    pub fn new_cgb(cart: Cartridge) -> Self {
+        let ppu = Ppu::new_cgb(cart.header().cgb_supported());
+        let mut bus = Self::with_ppu(cart, ppu, true);
+        bus.timer = Timer::with_div(CGB_POST_BOOT_DIV);
+        bus.apu.set_cgb(true);
+        bus
+    }
+
+    pub fn model(&self) -> Model {
+        if self.cgb {
+            Model::Cgb
+        } else {
+            Model::Dmg
+        }
+    }
+
+    pub fn double_speed(&self) -> bool {
+        self.double_speed
+    }
+
+    fn with_ppu(cart: Cartridge, ppu: Ppu, cgb: bool) -> Self {
         Bus {
             cart,
-            ppu: Ppu::new(),
+            ppu,
             apu: Apu::new(),
             timer: Timer::new(),
             serial: Serial::new(),
             joypad: Joypad::new(),
-            wram: Box::new([0; 0x2000]),
+            wram: vec![0; 0x8000],
+            svbk: 1,
+            cgb,
+            double_speed: false,
+            key1_armed: false,
+            ds_phase: false,
+            hdma: Hdma {
+                src: 0,
+                dst: 0,
+                len: 0x7F,
+                active: false,
+            },
+            rp: 0,
+            undoc: [0; 4],
             hram: [0; 0x7F],
             int_flag: 0x01,
             int_enable: 0x00,
@@ -63,20 +130,44 @@ impl Bus {
         }
     }
 
-    /// Advance every peripheral by one M-cycle (4 T-cycles).
+    /// Advance every peripheral by one M-cycle of the CPU clock, then let a pending
+    /// HBlank DMA block steal the bus.
     pub fn tick_m(&mut self) {
-        self.cycles += 4;
+        self.tick_cycle();
+        let hblank = self.ppu.take_hblank();
+        if hblank && self.hdma.active {
+            self.hdma_block();
+        }
+    }
+
+    /// One M-cycle of the CPU clock. In double speed the PPU/APU still run at the normal
+    /// rate (2 dots per M-cycle); OAM DMA and the cartridge clock run every second M-cycle.
+    fn tick_cycle(&mut self) {
+        let dots = if self.double_speed { 2 } else { 4 };
+        self.cycles += dots as u64;
         let div_before = self.timer.div_counter();
         let mut irqs = self.timer.tick();
-        if div_before & 0x1000 != 0 && self.timer.div_counter() & 0x1000 == 0 {
+        self.frame_sequencer_edge(div_before);
+        irqs |= self.serial.tick();
+        irqs |= self.ppu.tick(dots);
+        self.apu.tick(dots);
+        self.int_flag |= irqs;
+        if self.double_speed {
+            self.ds_phase = !self.ds_phase;
+            if self.ds_phase {
+                return;
+            }
+        }
+        self.cart.tick();
+        self.tick_dma();
+    }
+
+    /// APU frame sequencer steps on the falling edge of DIV bit 12 (bit 13 in double speed).
+    fn frame_sequencer_edge(&mut self, div_before: u16) {
+        let mask = if self.double_speed { 0x2000 } else { 0x1000 };
+        if div_before & mask != 0 && self.timer.div_counter() & mask == 0 {
             self.apu.frame_sequencer_step();
         }
-        irqs |= self.serial.tick();
-        irqs |= self.ppu.tick(4);
-        self.apu.tick(4);
-        self.cart.tick();
-        self.int_flag |= irqs;
-        self.tick_dma();
     }
 
     fn tick_dma(&mut self) {
@@ -92,6 +183,123 @@ impl Bus {
             } else {
                 self.dma.pending = Some((delay - 1, src));
             }
+        }
+    }
+
+    /// Copy one 16-byte HDMA/GDMA block. The CPU is stalled for 8 M-cycles
+    /// (16 in double speed) while the PPU and timers keep running.
+    fn hdma_block(&mut self) {
+        let m_cycles = if self.double_speed { 16 } else { 8 };
+        for i in 0..m_cycles {
+            self.tick_cycle();
+            for j in 0..16 / m_cycles {
+                let n = (i * (16 / m_cycles) + j) as u16;
+                let val = self.peek(self.hdma.src.wrapping_add(n));
+                self.ppu
+                    .dma_write_vram(0x8000 | (self.hdma.dst.wrapping_add(n) & 0x1FFF), val);
+            }
+        }
+        self.hdma.src = self.hdma.src.wrapping_add(16);
+        self.hdma.dst = self.hdma.dst.wrapping_add(16) & 0x1FF0;
+        self.hdma.len = self.hdma.len.wrapping_sub(1) & 0x7F;
+        if self.hdma.len == 0x7F {
+            self.hdma.active = false;
+        }
+        self.ppu.take_hblank();
+    }
+
+    fn write_hdma_control(&mut self, val: u8) {
+        if self.hdma.active && val & 0x80 == 0 {
+            // Cancel; the length bits take the written value.
+            self.hdma.active = false;
+            self.hdma.len = val & 0x7F;
+            return;
+        }
+        self.hdma.len = val & 0x7F;
+        if val & 0x80 == 0 {
+            self.hdma.active = true;
+            while self.hdma.active {
+                self.hdma_block();
+            }
+        } else {
+            self.hdma.active = true;
+            if self.ppu.in_hblank() {
+                self.hdma_block();
+            }
+        }
+    }
+
+    fn wram_index(&self, addr: u16) -> usize {
+        let off = (addr & 0x1FFF) as usize;
+        if off < 0x1000 {
+            off
+        } else {
+            off - 0x1000 + (self.svbk.max(1) as usize) * 0x1000
+        }
+    }
+
+    fn cgb_read(&self, addr: u16) -> u8 {
+        if !self.cgb {
+            return 0xFF;
+        }
+        let cgb_mode = self.cgb_mode();
+        match addr {
+            0xFF4F | 0xFF68..=0xFF6C => self.ppu.read_reg(addr),
+            0xFF72 | 0xFF73 => self.undoc[(addr - 0xFF72) as usize],
+            0xFF75 => 0x8F | self.undoc[3],
+            0xFF76 | 0xFF77 => 0x00,
+            // Unmapped in DMG compatibility mode.
+            _ if !cgb_mode => 0xFF,
+            0xFF4D => 0x7E | (self.double_speed as u8) << 7 | self.key1_armed as u8,
+            0xFF55 => (!self.hdma.active as u8) << 7 | self.hdma.len,
+            0xFF56 => self.rp | 0x3E,
+            0xFF70 => 0xF8 | self.svbk,
+            0xFF74 => self.undoc[2],
+            _ => 0xFF,
+        }
+    }
+
+    /// CGB hardware with a CGB cartridge (as opposed to DMG compatibility mode).
+    fn cgb_mode(&self) -> bool {
+        self.cgb && self.cart.header().cgb_supported()
+    }
+
+    fn cgb_write(&mut self, addr: u16, val: u8) {
+        if !self.cgb {
+            return;
+        }
+        let cgb_mode = self.cgb_mode();
+        match addr {
+            0xFF4F | 0xFF68..=0xFF6C => {
+                self.ppu.write_reg(addr, val);
+            }
+            0xFF72 | 0xFF73 => self.undoc[(addr - 0xFF72) as usize] = val,
+            0xFF75 => self.undoc[3] = val & 0x70,
+            _ if !cgb_mode => {}
+            0xFF4D => self.key1_armed = val & 1 != 0,
+            0xFF51 => self.hdma.src = (self.hdma.src & 0x00FF) | (val as u16) << 8,
+            0xFF52 => self.hdma.src = (self.hdma.src & 0xFF00) | (val & 0xF0) as u16,
+            0xFF53 => self.hdma.dst = (self.hdma.dst & 0x00FF) | ((val & 0x1F) as u16) << 8,
+            0xFF54 => self.hdma.dst = (self.hdma.dst & 0xFF00) | (val & 0xF0) as u16,
+            0xFF55 => self.write_hdma_control(val),
+            0xFF56 => self.rp = val & 0xC1,
+            0xFF70 => self.svbk = val & 7,
+            0xFF74 => self.undoc[2] = val,
+            _ => {}
+        }
+    }
+
+    /// STOP: perform an armed CGB speed switch.
+    fn speed_switch(&mut self) {
+        if !self.cgb || !self.key1_armed {
+            return;
+        }
+        self.key1_armed = false;
+        self.double_speed = !self.double_speed;
+        self.ds_phase = false;
+        self.poke(0xFF04, 0);
+        for _ in 0..SPEED_SWITCH_M_CYCLES {
+            self.tick_cycle();
         }
     }
 
@@ -111,8 +319,7 @@ impl Bus {
             0x0000..=0x7FFF => self.cart.read_rom(addr),
             0x8000..=0x9FFF => self.ppu.read_vram(addr),
             0xA000..=0xBFFF => self.cart.read_ram(addr),
-            0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
-            0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize],
+            0xC000..=0xFDFF => self.wram[self.wram_index(addr)],
             0xFE00..=0xFE9F => {
                 if self.dma_blocks_oam() {
                     0xFF
@@ -128,6 +335,7 @@ impl Bus {
             0xFF10..=0xFF3F => self.apu.read(addr),
             0xFF46 => self.dma.reg,
             0xFF40..=0xFF4B => self.ppu.read_reg(addr),
+            0xFF4C..=0xFF7F => self.cgb_read(addr),
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.int_enable,
             _ => 0xFF,
@@ -140,8 +348,10 @@ impl Bus {
             0x0000..=0x7FFF => self.cart.write_rom(addr, val),
             0x8000..=0x9FFF => self.ppu.write_vram(addr, val),
             0xA000..=0xBFFF => self.cart.write_ram(addr, val),
-            0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = val,
-            0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize] = val,
+            0xC000..=0xFDFF => {
+                let i = self.wram_index(addr);
+                self.wram[i] = val;
+            }
             0xFE00..=0xFE9F => {
                 if !self.dma_blocks_oam() {
                     self.ppu.write_oam(addr, val)
@@ -152,9 +362,7 @@ impl Bus {
             0xFF04..=0xFF07 => {
                 let before = self.timer.div_counter();
                 self.timer.write(addr, val);
-                if before & 0x1000 != 0 && self.timer.div_counter() & 0x1000 == 0 {
-                    self.apu.frame_sequencer_step();
-                }
+                self.frame_sequencer_edge(before);
             }
             0xFF0F => self.int_flag = val & 0x1F,
             0xFF10..=0xFF3F => self.apu.write(addr, val),
@@ -167,6 +375,7 @@ impl Bus {
                 // Register writes can raise STAT immediately (LYC/STAT/LCDC).
                 self.int_flag |= self.ppu.take_irq();
             }
+            0xFF4C..=0xFF7F => self.cgb_write(addr, val),
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = val,
             0xFFFF => self.int_enable = val,
             _ => {}
@@ -187,6 +396,10 @@ impl CpuBus for Bus {
 
     fn tick(&mut self) {
         self.tick_m();
+    }
+
+    fn stop(&mut self) {
+        self.speed_switch();
     }
 
     fn pending_interrupts(&self) -> u8 {

@@ -12,7 +12,7 @@ if [ "${1:-}" = "--update" ]; then update=1; shift; fi
 cargo build --release -q -p gb-runner
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
-suites=(--suite blargg --suite blargg-extra --suite mooneye --suite mooneye-mbc --suite acid2 --suite mbc3)
+suites=(--suite blargg --suite blargg-extra --suite mooneye --suite mooneye-mbc --suite acid2 --suite mbc3 --suite cgb)
 target/release/gbtest --roms roms "${suites[@]}" --json "$@" > "$tmp"
 
 python3 - "$tmp" scoreboard-baseline.json "$update" <<'PY'
