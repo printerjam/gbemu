@@ -163,10 +163,13 @@ fn main() {
     restore_terminal();
     save_battery(&gb, &sav);
     if let Some(path) = &args.dump {
-        // Fit to the real terminal if there is one, otherwise the native 160x72 cells.
-        let (cols, rows) = terminal::size()
-            .map(|(c, r)| (c as usize, r as usize))
-            .unwrap_or((usize::MAX, usize::MAX));
+        // Fit to the real terminal when interactive; headless dumps use the native 160x72 cells
+        // (crossterm's size() falls back to 80x24 via tput instead of failing without a tty).
+        let (cols, rows) = if interactive {
+            terminal::size().map(|(c, r)| (c as usize, r as usize)).unwrap_or((usize::MAX, usize::MAX))
+        } else {
+            (usize::MAX, usize::MAX)
+        };
         let (w, h) = render::fit(cols, rows);
         let cells = render::to_cells(gb.framebuffer(), w, h, args.palette);
         if let Err(e) = std::fs::write(path, render::render_plain(&cells, w, h)) {
