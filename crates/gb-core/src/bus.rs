@@ -57,7 +57,7 @@ pub struct Bus {
     double_speed: bool,
     /// KEY1 bit 0: speed switch armed for the next STOP.
     key1_armed: bool,
-    /// Alternates in double speed so DMA/cartridge run every second M-cycle.
+    /// Alternates in double speed so the cartridge clock runs every second M-cycle.
     ds_phase: bool,
     hdma: Hdma,
     /// FF56 (infrared port) and FF72-FF75 scratch registers.
@@ -163,6 +163,8 @@ impl Bus {
         irqs |= self.ppu.tick(dots);
         self.apu.tick(dots);
         self.int_flag |= irqs;
+        // OAM DMA runs on the CPU clock (one byte per M-cycle even in double speed).
+        self.tick_dma();
         if self.double_speed {
             self.ds_phase = !self.ds_phase;
             if self.ds_phase {
@@ -170,7 +172,6 @@ impl Bus {
             }
         }
         self.cart.tick();
-        self.tick_dma();
     }
 
     /// APU frame sequencer steps on the falling edge of DIV bit 12 (bit 13 in double speed).
