@@ -320,6 +320,25 @@ impl Bus {
         self.dma.active.is_some()
     }
 
+    /// Which memory bus an address sits on while OAM DMA runs: DMG has an external bus (cartridge and
+    /// WRAM) and a video bus; CGB additionally gives WRAM its own bus.
+    fn dma_bus_class(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x8000..=0x9FFF => Some(1),
+            0xC000..=0xFDFF if self.cgb => Some(2),
+            0x0000..=0x7FFF | 0xA000..=0xFDFF => Some(0),
+            _ => None,
+        }
+    }
+
+    /// The byte on the bus when the CPU touches `addr` in the same M-cycle as a DMA transfer.
+    fn dma_conflict(&self, addr: u16) -> Option<u8> {
+        let (index, base) = self.dma.active?;
+        let src = base + index as u16;
+        let class = self.dma_bus_class(addr)?;
+        (self.dma_bus_class(src)? == class).then(|| self.dma_source_read(src))
+    }
+
     /// Side-effect-free read (no clock advance); also used by debuggers.
     pub fn peek(&self, addr: u16) -> u8 {
         match addr {
@@ -407,19 +426,21 @@ impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Read);
-        self.peek(addr)
+        self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr))
     }
 
     fn read_idu(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::ReadInc);
-        self.peek(addr)
+        self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr))
     }
 
     fn write(&mut self, addr: u16, val: u8) {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Write);
-        self.poke(addr, val);
+        if self.dma_conflict(addr).is_none() {
+            self.poke(addr, val);
+        }
     }
 
     fn tick_idu(&mut self, addr: u16) {
