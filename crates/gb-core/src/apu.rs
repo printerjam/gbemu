@@ -186,7 +186,11 @@ pub struct Apu {
     level_r: f32,
     acc_l: f64,
     acc_r: f64,
-    acc_n: u32,
+    /// `cycles` at the last accumulator flush / start of the current output window.
+    acc_from: u64,
+    win_start: u64,
+    until_sample: u32,
+    hp_charge: f32,
     phase: u64,
     hp_l: f32,
     hp_r: f32,
@@ -228,7 +232,10 @@ impl Apu {
             level_r: 0.0,
             acc_l: 0.0,
             acc_r: 0.0,
-            acc_n: 0,
+            acc_from: 0,
+            win_start: 0,
+            until_sample: CLOCK.div_ceil(48_000) as u32,
+            hp_charge: 0.999958f32.powf(CLOCK as f32 / 48_000.0),
             phase: 0,
             hp_l: 0.0,
             hp_r: 0.0,
@@ -253,23 +260,41 @@ impl Apu {
     /// Advance `t_cycles` T-cycles.
     pub fn tick(&mut self, t_cycles: u32) {
         self.ds = t_cycles < 4;
-        let mut remaining = t_cycles;
         let rate = self.sample_rate as u64;
+        // A disabled square channel's frequency timer is frozen (its duty position is kept).
+        let t1 = if self.ch1.enabled { self.ch1.timer } else { NEVER };
+        let t2 = if self.ch2.enabled { self.ch2.timer } else { NEVER };
+        // Fast path: no channel event and no output sample is due within this call.
+        if t_cycles < self.until_sample && t_cycles < t1.min(t2).min(self.ch3_timer).min(self.ch4_timer) {
+            self.cycles += t_cycles as u64;
+            self.phase += rate * t_cycles as u64;
+            self.until_sample -= t_cycles;
+            if t1 != NEVER {
+                self.ch1.timer -= t_cycles;
+            }
+            if t2 != NEVER {
+                self.ch2.timer -= t_cycles;
+            }
+            if self.ch3_timer != NEVER {
+                self.ch3_timer -= t_cycles;
+            }
+            if self.ch4_timer != NEVER {
+                self.ch4_timer -= t_cycles;
+            }
+            return;
+        }
+        let mut remaining = t_cycles;
         while remaining > 0 {
-            let to_sample = (CLOCK - self.phase).div_ceil(rate).max(1) as u32;
-            let mut chunk = remaining.min(to_sample);
-            // A disabled square channel's frequency timer is frozen (its duty position is kept).
             let (run1, run2) = (self.ch1.enabled, self.ch2.enabled);
-            chunk = chunk
+            let chunk = remaining
+                .min(self.until_sample)
                 .min(if run1 { self.ch1.timer } else { NEVER })
                 .min(if run2 { self.ch2.timer } else { NEVER })
                 .min(self.ch3_timer)
                 .min(self.ch4_timer);
 
-            self.acc_l += self.level_l as f64 * chunk as f64;
-            self.acc_r += self.level_r as f64 * chunk as f64;
-            self.acc_n += chunk;
             self.phase += rate * chunk as u64;
+            self.until_sample -= chunk;
             self.cycles += chunk as u64;
             remaining -= chunk;
 
@@ -317,19 +342,34 @@ impl Apu {
             if self.phase >= CLOCK {
                 self.phase -= CLOCK;
                 self.emit_sample();
+                self.until_sample = self.samples_until_next();
             }
         }
     }
 
+    /// T-cycles until the output phase accumulator next wraps.
+    fn samples_until_next(&self) -> u32 {
+        (CLOCK - self.phase).div_ceil(self.sample_rate as u64).max(1) as u32
+    }
+
+    /// Fold the current output level into the running average up to the present cycle.
+    fn flush_acc(&mut self) {
+        let d = (self.cycles - self.acc_from) as f64;
+        self.acc_l += self.level_l as f64 * d;
+        self.acc_r += self.level_r as f64 * d;
+        self.acc_from = self.cycles;
+    }
+
     fn emit_sample(&mut self) {
-        let n = self.acc_n.max(1) as f64;
+        self.flush_acc();
+        let n = (self.cycles - self.win_start).max(1) as f64;
         let l = (self.acc_l / n) as f32;
         let r = (self.acc_r / n) as f32;
         self.acc_l = 0.0;
         self.acc_r = 0.0;
-        self.acc_n = 0;
+        self.win_start = self.cycles;
         // DC-blocking high-pass (capacitor), DMG charge factor.
-        let charge = 0.999958f32.powf(CLOCK as f32 / self.sample_rate as f32);
+        let charge = self.hp_charge;
         let ol = l - self.hp_l;
         self.hp_l = l - ol * charge;
         let or = r - self.hp_r;
@@ -558,6 +598,7 @@ impl Apu {
     }
 
     fn update_levels(&mut self) {
+        self.flush_acc();
         if !self.power {
             if self.level_l != 0.0 || self.level_r != 0.0 {
                 self.level_changes += 1;
@@ -573,9 +614,7 @@ impl Apu {
             self.regs[0x0A] & 0x80 != 0,
             self.regs[0x11] & 0xF8 != 0,
         ];
-        let o: Vec<f32> = (0..4).map(|i| Self::dac(dac_on[i], d[i])).collect();
-        let (o1, o2, o3, o4) = (o[0], o[1], o[2], o[3]);
-        let outs = [o1, o2, o3, o4];
+        let outs: [f32; 4] = std::array::from_fn(|i| Self::dac(dac_on[i], d[i]));
         let nr51 = self.regs[0x15];
         let nr50 = self.regs[0x14];
         let mix = |mask: u8, vol: u8| {
@@ -908,7 +947,10 @@ impl Apu {
         self.phase = 0;
         self.acc_l = 0.0;
         self.acc_r = 0.0;
-        self.acc_n = 0;
+        self.acc_from = self.cycles;
+        self.win_start = self.cycles;
+        self.until_sample = self.samples_until_next();
+        self.hp_charge = 0.999958f32.powf(CLOCK as f32 / self.sample_rate as f32);
     }
 
     /// Move generated samples (stereo interleaved L,R as f32 in -1.0..=1.0)
