@@ -27,6 +27,9 @@ pub trait CpuBus {
     fn double_speed(&self) -> bool {
         false
     }
+    /// Called before every instruction, interrupt dispatch or halted idle cycle: the point where a pending
+    /// HBlank DMA block takes the bus.
+    fn instruction_boundary(&mut self) {}
     /// STOP executed. The bus performs a CGB speed switch if one is armed.
     fn stop(&mut self) {}
     /// `IE & IF & 0x1F`: interrupts requested and enabled.
@@ -123,6 +126,7 @@ impl Cpu {
     /// instruction ran (halted idle cycle or interrupt dispatch). CB-prefixed
     /// instructions return `Some(0xCB)`.
     pub fn step(&mut self, bus: &mut impl CpuBus) -> Option<u8> {
+        bus.instruction_boundary();
         if self.locked {
             bus.tick();
             return None;

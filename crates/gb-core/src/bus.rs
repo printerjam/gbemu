@@ -68,7 +68,7 @@ pub struct Bus {
     /// Alternates in double speed so the cartridge clock runs every second M-cycle.
     ds_phase: bool,
     hdma: Hdma,
-    /// HBlank started during the current M-cycle; the block runs once its access is done.
+    /// HBlank started since the last instruction boundary.
     hdma_due: bool,
     /// FF56 (infrared port) and FF72-FF75 scratch registers.
     rp: u8,
@@ -158,9 +158,9 @@ impl Bus {
         }
     }
 
-    /// An HBlank DMA block that became due during the M-cycle just executed takes the bus now, after the
-    /// CPU's own access of that cycle (it never sees the transferred data early).
-    fn finish_cycle(&mut self) {
+    /// An HBlank DMA block that became due takes the bus at the next instruction boundary (the instruction in
+    /// progress, including its own access, completes first).
+    fn run_due_hdma(&mut self) {
         if self.hdma_due {
             self.hdma_due = false;
             if self.hdma.active {
@@ -236,15 +236,24 @@ impl Bus {
             self.tick_cycle();
             for j in 0..16 / m_cycles {
                 let n = (i * (16 / m_cycles) + j) as u16;
-                let val = self.peek(self.hdma.src.wrapping_add(n));
+                let src = self.hdma.src.wrapping_add(n);
+                // VRAM and the 0xE000+ region are not readable by the transfer unit: the cartridge bus floats
+                // high (gambatte dma_*_read).
+                let val = if (0x8000..0xA000).contains(&src) || src >= 0xE000 {
+                    0xFF
+                } else {
+                    self.peek(src)
+                };
                 self.ppu
                     .dma_write_vram(0x8000 | (self.hdma.dst.wrapping_add(n) & 0x1FFF), val);
             }
         }
         self.hdma.src = self.hdma.src.wrapping_add(16);
-        self.hdma.dst = self.hdma.dst.wrapping_add(16) & 0x1FF0;
+        // The destination counter is 16 bits wide; a transfer stops when it runs off the end.
+        let dst_end = self.hdma.dst.checked_add(16);
+        self.hdma.dst = self.hdma.dst.wrapping_add(16);
         self.hdma.len = self.hdma.len.wrapping_sub(1) & 0x7F;
-        if self.hdma.len == 0x7F {
+        if self.hdma.len == 0x7F || dst_end.is_none() {
             self.hdma.active = false;
         }
         if trailing_cycle {
@@ -326,7 +335,7 @@ impl Bus {
             0xFF4D => self.key1_armed = val & 1 != 0,
             0xFF51 => self.hdma.src = (self.hdma.src & 0x00FF) | (val as u16) << 8,
             0xFF52 => self.hdma.src = (self.hdma.src & 0xFF00) | (val & 0xF0) as u16,
-            0xFF53 => self.hdma.dst = (self.hdma.dst & 0x00FF) | ((val & 0x1F) as u16) << 8,
+            0xFF53 => self.hdma.dst = (self.hdma.dst & 0x00FF) | (val as u16) << 8,
             0xFF54 => self.hdma.dst = (self.hdma.dst & 0xFF00) | (val & 0xF0) as u16,
             0xFF55 => self.write_hdma_control(val),
             0xFF56 => self.rp = val & 0xC1,
@@ -483,7 +492,6 @@ impl CpuBus for Bus {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Read);
         let v = self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr));
-        self.finish_cycle();
         v
     }
 
@@ -491,7 +499,6 @@ impl CpuBus for Bus {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::ReadInc);
         let v = self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr));
-        self.finish_cycle();
         v
     }
 
@@ -507,7 +514,6 @@ impl CpuBus for Bus {
         } else {
             self.poke(addr, val);
         }
-        self.finish_cycle();
     }
 
     fn double_speed(&self) -> bool {
@@ -517,12 +523,14 @@ impl CpuBus for Bus {
     fn tick_idu(&mut self, addr: u16) {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Write);
-        self.finish_cycle();
     }
 
     fn tick(&mut self) {
         self.tick_m();
-        self.finish_cycle();
+    }
+
+    fn instruction_boundary(&mut self) {
+        self.run_due_hdma();
     }
 
     fn stop(&mut self) {

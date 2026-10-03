@@ -48,6 +48,16 @@ turtle 2/2, little-things 1/2, bully 0/1, strikethrough 0/1, mooneye-cgb 3/9.
 - Toolchain: Homebrew rust for the workspace; rustup (~/.cargo, wasm32 target, rustfmt/clippy components) for the web build.
 - `roms/` is write-protected (it was wiped once mid-session; refetch with scripts/fetch-roms.sh).
 
+- CGB speed switch: the pause is 2^17 CPU clocks (0x8000 M-cycles) in either direction (gambatte `Memory::stop`, age
+  `spsw-tima`: 128 increments of the 4 KHz timer); DIV is reset at its start. OPEN CONFLICT: the TIMA immediate-increment
+  sample on that reset is calibrated to gambatte `speedchange_tima0*` (4 KHz sampled one M-cycle before the reset);
+  age `spsw-tima-cgbBC` wants every clock one M-cycle later. Both are CGB-C hardware results, so a 1 M-cycle error
+  remains somewhere in the model (suspect: interrupt-dispatch/HBlank phase relative to the TIMA edge); gambatte wins (16 vs 1 tests).
+- HDMA/GDMA: a transfer unit ends one M-cycle after its last byte; an HBlank block runs at the next instruction
+  boundary (`CpuBus::instruction_boundary`); sources in VRAM / 0xE000+ read 0xFF; the destination counter is 16 bits wide and a
+  transfer stops at its end. Remaining `hdma_start_2`/`hdma_late_*_2` boundary pairs want the block ~1 M-cycle earlier
+  than our HBlank start: PPU mode-0 timing, not bus logic.
+
 ## Log
 
 - 2026-10-02: skeleton + plan; test ROMs v7.0.
