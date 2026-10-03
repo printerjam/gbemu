@@ -46,6 +46,11 @@
     <option value="1">DMG green</option>
     <option value="2">Pocket</option>
   </select>
+  <select id="model" title="Console model">
+    <option value="auto">Model: auto</option>
+    <option value="dmg">Model: DMG</option>
+    <option value="cgb">Model: CGB</option>
+  </select>
   <button id="pause" disabled>Pause</button>
   <button id="reset" disabled>Reset</button>
   <button id="savestate" disabled>Save state</button>
@@ -53,7 +58,7 @@
 </header>
 <main>
   <canvas id="screen" width="160" height="144"></canvas>
-  <div id="hint">Drop a .gb ROM here or use “Load ROM…”</div>
+  <div id="hint">Drop a .gb / .gbc ROM here or use “Load ROM…”</div>
 </main>
 <div id="status">&nbsp;</div>
 <div id="pad">
@@ -64,14 +69,14 @@
       <span></span><div class="b" data-btn="3">▼</div><span></span>
     </div>
     <div id="ab"><div class="b" data-btn="5">B</div><div class="b" data-btn="4">A</div></div>
-    <div id="ss"><div class="b" data-btn="6">SELECT</div><div class="b" data-btn="7">START</div></div>
+    <div id="ss"><div class="b" data-btn="6">SELECT</div><div class="b" data-btn="7">START</div><div class="b" id="rw" title="Hold to rewind">⏪</div></div>
   </div>
 </div>
 <footer>
-  <kbd>←↑↓→</kbd>/<kbd>WASD</kbd> d-pad · <kbd>X</kbd> A · <kbd>Z</kbd> B · <kbd>Enter</kbd> Start · <kbd>Backspace</kbd> Select · <kbd>P</kbd> pause
+  <kbd>←↑↓→</kbd>/<kbd>WASD</kbd> d-pad · <kbd>X</kbd> A · <kbd>Z</kbd> B · <kbd>Enter</kbd> Start · <kbd>Backspace</kbd> Select · <kbd>P</kbd> pause · hold <kbd>Q</kbd> rewind
 </footer>
 <section id="about">
-  <strong>gbemu</strong> is a Game Boy (DMG) emulator written from scratch in Rust, compiled to WebAssembly &mdash;
+  <strong>gbemu</strong> is a Game Boy / Game Boy Color emulator written from scratch in Rust, compiled to WebAssembly &mdash;
   source on <a href="https://github.com/printerjam/gbemu" target="_blank" rel="noopener">GitHub</a>.
   No games are included or uploaded anywhere: ROMs are loaded and run locally in your browser. Bring your own
   homebrew &mdash; there are plenty of free games on <a href="https://hh.gbdev.io/" target="_blank" rel="noopener">Homebrew Hub</a>
