@@ -370,6 +370,7 @@ impl Bus {
                 let before = self.timer.div_counter();
                 self.timer.write(addr, val);
                 self.frame_sequencer_edge(before);
+                self.int_flag |= self.timer.take_write_irq();
                 self.int_flag |= self.serial.clock(before, self.timer.div_counter());
             }
             0xFF0F => self.int_flag = val & 0x1F,
