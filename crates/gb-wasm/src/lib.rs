@@ -81,6 +81,20 @@ impl Emulator {
         }
     }
 
+    /// Install a Game Genie (`ABC-DEF-GHI`, `ABC-DEF`) or GameShark (`01VVLLHH`) code. Throws on invalid codes.
+    pub fn add_cheat(&mut self, code: &str) -> Result<(), JsError> {
+        self.gb.add_cheat(code).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Side-effect-free read of the CPU-visible memory map (debugging / tests; Game Genie patches are visible).
+    pub fn peek(&self, addr: u16) -> u8 {
+        self.gb.bus.peek(addr)
+    }
+
+    pub fn clear_cheats(&mut self) {
+        self.gb.clear_cheats();
+    }
+
     /// Emulate one video frame, refresh the RGBA frame and collect the audio produced.
     pub fn run_frame(&mut self) {
         self.rewind.frame(&self.gb);
