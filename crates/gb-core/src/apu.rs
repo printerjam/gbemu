@@ -33,6 +33,12 @@ struct Envelope {
     timer: u8,
     /// Still doing automatic updates (cleared when the volume reaches its limit).
     active: bool,
+    // CGB model (after SameBoy's reverse engineering): a free-running 3-bit countdown, a pending-tick flag set
+    // half a sequencer period after the countdown reaches zero, and a lock that stops overflow.
+    countdown: u8,
+    clock: bool,
+    should_lock: bool,
+    locked: bool,
 }
 
 impl Envelope {
@@ -40,9 +46,88 @@ impl Envelope {
         self.volume = nrx2 >> 4;
         self.timer = Self::period(nrx2);
         self.active = true;
+        self.countdown = nrx2 & 7;
+        self.clock = false;
+        self.locked = false;
+    }
+
+    fn set_clock(&mut self, value: bool, add: bool) {
+        if self.clock == value {
+            return;
+        }
+        if value {
+            self.clock = true;
+            self.should_lock = (self.volume == 15 && add) || (self.volume == 0 && !add);
+        } else {
+            self.clock = false;
+            self.locked |= self.should_lock;
+        }
+    }
+
+    /// CGB sequencer event: apply a pending envelope tick.
+    fn cgb_tick(&mut self, nrx2: u8) {
+        self.set_clock(false, false);
+        if self.locked || nrx2 & 7 == 0 {
+            return;
+        }
+        self.volume = if nrx2 & 8 != 0 {
+            self.volume + 1
+        } else {
+            self.volume.wrapping_sub(1)
+        } & 15;
+    }
+
+    /// CGB: the countdown runs every 64 Hz step whether or not the envelope is enabled.
+    fn cgb_countdown(&mut self) {
+        if !self.clock {
+            self.countdown = self.countdown.wrapping_sub(1) & 7;
+        }
+    }
+
+    /// CGB: half a sequencer period later, an expired countdown reloads and queues a tick.
+    fn cgb_reload(&mut self, nrx2: u8) {
+        if self.countdown == 0 {
+            self.countdown = nrx2 & 7;
+            self.set_clock(self.countdown != 0, nrx2 & 8 != 0);
+        }
+    }
+
+    /// NRx2 write on a running channel, CGB (SameBoy's `_nrx2_glitch`).
+    fn cgb_glitch(&mut self, new: u8, old: u8) {
+        if self.clock {
+            self.countdown = new & 7;
+        }
+        let mut tick = new & 7 != 0 && old & 7 == 0 && !self.locked;
+        let invert = (new ^ old) & 8 != 0;
+        if new & 0xF == 8 && old & 0xF == 8 && !self.locked {
+            tick = true;
+        }
+        let mut v = self.volume;
+        if invert {
+            if new & 8 != 0 {
+                v = if old & 7 == 0 && !self.locked {
+                    v ^ 0xF
+                } else {
+                    0xEu8.wrapping_sub(v) & 0xF
+                };
+                tick = false;
+            } else {
+                v = 0x10u8.wrapping_sub(v) & 0xF;
+            }
+        }
+        if tick {
+            v = if new & 8 != 0 { v + 1 } else { v.wrapping_sub(1) } & 0xF;
+        } else if new & 7 == 0 && self.clock {
+            self.set_clock(false, false);
+        }
+        self.volume = v;
     }
     /// NRx2 written while the channel plays ("zombie mode"): the volume is bumped depending on the old value.
     fn zombie_write(&mut self, old: u8, new: u8, cgb: bool) {
+        if cgb {
+            self.cgb_glitch(new, old);
+            return;
+        }
         let mut v = self.volume as i32;
         let invert = (old ^ new) & 8 != 0;
         if cgb {
@@ -186,7 +271,11 @@ pub struct Apu {
     level_r: f32,
     acc_l: f64,
     acc_r: f64,
-    acc_n: u32,
+    /// `cycles` at the last accumulator flush / start of the current output window.
+    acc_from: u64,
+    win_start: u64,
+    until_sample: u32,
+    hp_charge: f32,
     phase: u64,
     hp_l: f32,
     hp_r: f32,
@@ -228,7 +317,10 @@ impl Apu {
             level_r: 0.0,
             acc_l: 0.0,
             acc_r: 0.0,
-            acc_n: 0,
+            acc_from: 0,
+            win_start: 0,
+            until_sample: CLOCK.div_ceil(48_000) as u32,
+            hp_charge: 0.999958f32.powf(CLOCK as f32 / 48_000.0),
             phase: 0,
             hp_l: 0.0,
             hp_r: 0.0,
@@ -253,23 +345,41 @@ impl Apu {
     /// Advance `t_cycles` T-cycles.
     pub fn tick(&mut self, t_cycles: u32) {
         self.ds = t_cycles < 4;
-        let mut remaining = t_cycles;
         let rate = self.sample_rate as u64;
+        // A disabled square channel's frequency timer is frozen (its duty position is kept).
+        let t1 = if self.ch1.enabled { self.ch1.timer } else { NEVER };
+        let t2 = if self.ch2.enabled { self.ch2.timer } else { NEVER };
+        // Fast path: no channel event and no output sample is due within this call.
+        if t_cycles < self.until_sample && t_cycles < t1.min(t2).min(self.ch3_timer).min(self.ch4_timer) {
+            self.cycles += t_cycles as u64;
+            self.phase += rate * t_cycles as u64;
+            self.until_sample -= t_cycles;
+            if t1 != NEVER {
+                self.ch1.timer -= t_cycles;
+            }
+            if t2 != NEVER {
+                self.ch2.timer -= t_cycles;
+            }
+            if self.ch3_timer != NEVER {
+                self.ch3_timer -= t_cycles;
+            }
+            if self.ch4_timer != NEVER {
+                self.ch4_timer -= t_cycles;
+            }
+            return;
+        }
+        let mut remaining = t_cycles;
         while remaining > 0 {
-            let to_sample = (CLOCK - self.phase).div_ceil(rate).max(1) as u32;
-            let mut chunk = remaining.min(to_sample);
-            // A disabled square channel's frequency timer is frozen (its duty position is kept).
             let (run1, run2) = (self.ch1.enabled, self.ch2.enabled);
-            chunk = chunk
+            let chunk = remaining
+                .min(self.until_sample)
                 .min(if run1 { self.ch1.timer } else { NEVER })
                 .min(if run2 { self.ch2.timer } else { NEVER })
                 .min(self.ch3_timer)
                 .min(self.ch4_timer);
 
-            self.acc_l += self.level_l as f64 * chunk as f64;
-            self.acc_r += self.level_r as f64 * chunk as f64;
-            self.acc_n += chunk;
             self.phase += rate * chunk as u64;
+            self.until_sample -= chunk;
             self.cycles += chunk as u64;
             remaining -= chunk;
 
@@ -317,19 +427,34 @@ impl Apu {
             if self.phase >= CLOCK {
                 self.phase -= CLOCK;
                 self.emit_sample();
+                self.until_sample = self.samples_until_next();
             }
         }
     }
 
+    /// T-cycles until the output phase accumulator next wraps.
+    fn samples_until_next(&self) -> u32 {
+        (CLOCK - self.phase).div_ceil(self.sample_rate as u64).max(1) as u32
+    }
+
+    /// Fold the current output level into the running average up to the present cycle.
+    fn flush_acc(&mut self) {
+        let d = (self.cycles - self.acc_from) as f64;
+        self.acc_l += self.level_l as f64 * d;
+        self.acc_r += self.level_r as f64 * d;
+        self.acc_from = self.cycles;
+    }
+
     fn emit_sample(&mut self) {
-        let n = self.acc_n.max(1) as f64;
+        self.flush_acc();
+        let n = (self.cycles - self.win_start).max(1) as f64;
         let l = (self.acc_l / n) as f32;
         let r = (self.acc_r / n) as f32;
         self.acc_l = 0.0;
         self.acc_r = 0.0;
-        self.acc_n = 0;
+        self.win_start = self.cycles;
         // DC-blocking high-pass (capacitor), DMG charge factor.
-        let charge = 0.999958f32.powf(CLOCK as f32 / self.sample_rate as f32);
+        let charge = self.hp_charge;
         let ol = l - self.hp_l;
         self.hp_l = l - ol * charge;
         let or = r - self.hp_r;
@@ -357,7 +482,23 @@ impl Apu {
         if step == 2 || step == 6 {
             self.clock_sweep();
         }
-        if step == 7 {
+        if self.cgb {
+            let (r1, r2, r4) = (self.regs[0x02], self.regs[0x07], self.regs[0x11]);
+            if step == 6 {
+                self.ch1.env.cgb_countdown();
+                self.ch2.env.cgb_countdown();
+                self.ch4_env.cgb_countdown();
+            }
+            if self.ch1.env.clock {
+                self.ch1.env.cgb_tick(r1);
+            }
+            if self.ch2.env.clock {
+                self.ch2.env.cgb_tick(r2);
+            }
+            if self.ch4_env.clock {
+                self.ch4_env.cgb_tick(r4);
+            }
+        } else if step == 7 {
             let (r1, r2, r4) = (self.regs[0x02], self.regs[0x07], self.regs[0x11]);
             if self.ch1.enabled {
                 self.ch1.env.clock(r1);
@@ -368,6 +509,24 @@ impl Apu {
             if self.ch4_enabled {
                 self.ch4_env.clock(r4);
             }
+        }
+        self.update_levels();
+    }
+
+    /// Half-period event of the frame sequencer (rising edge of the DIV bit); the bus calls it on CGB.
+    pub fn frame_sequencer_half(&mut self) {
+        if !self.power || !self.cgb {
+            return;
+        }
+        let (r1, r2, r4) = (self.regs[0x02], self.regs[0x07], self.regs[0x11]);
+        if self.ch1.enabled {
+            self.ch1.env.cgb_reload(r1);
+        }
+        if self.ch2.enabled {
+            self.ch2.env.cgb_reload(r2);
+        }
+        if self.ch4_enabled {
+            self.ch4_env.cgb_reload(r4);
         }
         self.update_levels();
     }
@@ -558,6 +717,7 @@ impl Apu {
     }
 
     fn update_levels(&mut self) {
+        self.flush_acc();
         if !self.power {
             if self.level_l != 0.0 || self.level_r != 0.0 {
                 self.level_changes += 1;
@@ -573,9 +733,7 @@ impl Apu {
             self.regs[0x0A] & 0x80 != 0,
             self.regs[0x11] & 0xF8 != 0,
         ];
-        let o: Vec<f32> = (0..4).map(|i| Self::dac(dac_on[i], d[i])).collect();
-        let (o1, o2, o3, o4) = (o[0], o[1], o[2], o[3]);
-        let outs = [o1, o2, o3, o4];
+        let outs: [f32; 4] = std::array::from_fn(|i| Self::dac(dac_on[i], d[i]));
         let nr51 = self.regs[0x15];
         let nr50 = self.regs[0x14];
         let mix = |mask: u8, vol: u8| {
@@ -908,7 +1066,10 @@ impl Apu {
         self.phase = 0;
         self.acc_l = 0.0;
         self.acc_r = 0.0;
-        self.acc_n = 0;
+        self.acc_from = self.cycles;
+        self.win_start = self.cycles;
+        self.until_sample = self.samples_until_next();
+        self.hp_charge = 0.999958f32.powf(CLOCK as f32 / self.sample_rate as f32);
     }
 
     /// Move generated samples (stereo interleaved L,R as f32 in -1.0..=1.0)

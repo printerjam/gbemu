@@ -208,8 +208,11 @@ impl Bus {
     #[inline]
     fn frame_sequencer_edge(&mut self, div_before: u16) {
         let mask = if self.double_speed { 0x2000 } else { 0x1000 };
-        if div_before & mask != 0 && self.timer.div_counter() & mask == 0 {
+        let div_now = self.timer.div_counter();
+        if div_before & mask != 0 && div_now & mask == 0 {
             self.apu.frame_sequencer_step();
+        } else if div_before & mask == 0 && div_now & mask != 0 {
+            self.apu.frame_sequencer_half();
         }
     }
 
