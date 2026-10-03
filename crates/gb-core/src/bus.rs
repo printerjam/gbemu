@@ -20,6 +20,8 @@ struct Dma {
     active: Option<(u8, u16)>,
     /// Requested transfer and M-cycles until it takes over.
     pending: Option<(u8, u16)>,
+    /// Byte a CPU write drove onto the DMA's bus; the transfer in progress copies it instead of the source.
+    forced: Option<u8>,
 }
 
 /// CGB VRAM DMA (FF51-FF55).
@@ -135,6 +137,7 @@ impl Bus {
                 reg: 0xFF,
                 active: None,
                 pending: None,
+                forced: None,
             },
             cycles: 0,
         }
@@ -188,7 +191,14 @@ impl Bus {
 
     fn tick_dma(&mut self) {
         if let Some((index, src)) = self.dma.active {
-            let val = self.dma_source_read(src + index as u16);
+            let mut val = self.dma_source_read(src + index as u16);
+            if let Some(forced) = self.dma.forced.take() {
+                val = if !self.cgb && src + index as u16 >= 0xC000 {
+                    val & forced
+                } else {
+                    forced
+                };
+            }
             self.ppu.write_oam_dma(index, val);
             self.dma.active = if index < 159 { Some((index + 1, src)) } else { None };
         }
@@ -345,7 +355,8 @@ impl Bus {
         let (index, base) = self.dma.active?;
         let src = base + index as u16;
         let class = self.dma_bus_class(addr)?;
-        (self.dma_bus_class(src)? == class).then(|| self.dma_source_read(src))
+        (self.dma_bus_class(if src >= 0xE000 { src - 0x2000 } else { src })? == class)
+            .then(|| self.dma_source_read(src))
     }
 
     /// Side-effect-free read (no clock advance); also used by debuggers.
@@ -369,7 +380,13 @@ impl Bus {
                     self.ppu.read_oam(addr)
                 }
             }
-            0xFEA0..=0xFEFF => 0x00,
+            0xFEA0..=0xFEFF => {
+                if self.dma_blocks_oam() {
+                    0xFF
+                } else {
+                    0x00
+                }
+            }
             0xFF00 => self.joypad.read(),
             0xFF01..=0xFF02 => self.serial.read(addr),
             0xFF04..=0xFF07 => self.timer.read(addr),
@@ -455,7 +472,13 @@ impl CpuBus for Bus {
     fn write(&mut self, addr: u16, val: u8) {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Write);
-        if self.dma_conflict(addr).is_none() {
+        if self.dma_conflict(addr).is_some() {
+            // The DMA latches what the two bus drivers produce: the CPU's data, wired-ANDed with the source
+            // byte when that comes from DMG WRAM; CGB WRAM sources are not disturbed at all.
+            if !self.cgb || self.dma.active.is_some_and(|(i, base)| base + (i as u16) < 0xC000) {
+                self.dma.forced = Some(val);
+            }
+        } else {
             self.poke(addr, val);
         }
     }
