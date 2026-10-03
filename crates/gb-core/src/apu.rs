@@ -266,6 +266,9 @@ pub struct Apu {
     skip_fs: bool,
     #[serde(skip)]
     ds: bool,
+    /// Emulate CGB revision C and older where timing differs from D/E (default: E).
+    #[serde(skip)]
+    rev_c: bool,
     /// After such a power-on the sequencer behaves as if its next step were odd until the first event runs.
     #[serde(skip)]
     fs_quirk_odd: bool,
@@ -343,6 +346,7 @@ impl Apu {
             div_bit: false,
             skip_fs: false,
             ds: false,
+            rev_c: false,
             fs_quirk_odd: false,
             level_changes: 0,
             power: true,
@@ -809,21 +813,22 @@ impl Apu {
         (2048 - f) * 4
     }
 
-    /// Time to the first duty step after a trigger (CGB): the period plus two ticks (one if the channel was already
-    /// running), rounded up to the next edge of the 1 MHz channel clock, which restarts at power-on. In double
-    /// speed the extra ticks are dropped: SameSuite (CGB-E) wants them, Gambatte (CGB-C) does not, and we follow
-    /// Gambatte there, as SameBoy does for pre-D revisions.
+    /// Time to the first duty step after a trigger (CGB), in T-cycles. The channel clock runs at 1 MHz from
+    /// power-on; the first step comes the period plus a start delay later, which depends on the clock phase
+    /// (`lf_div`), on whether the channel was already running, and (for revisions up to CGB-C) on double speed.
     fn square_start(&self, base: usize, active: bool) -> u32 {
         if !self.cgb {
             return self.square_period(base);
         }
-        let t = self.square_period(base) + if active { 4 } else { 8 };
-        let delta = (4 - ((self.cycles.wrapping_sub(self.power_on_at) as u32 + t) & 3)) % 4;
-        if self.ds {
-            t - 8 + delta
+        let lf = self.lf_div() as i32;
+        let delay = if active {
+            4 - lf
+        } else if self.ds && self.rev_c {
+            6 + lf
         } else {
-            t + delta
-        }
+            6 - lf
+        };
+        (self.square_period(base) as i32 + 2 * (delay - 1)) as u32
     }
 
     fn wave_period(&self) -> u32 {
