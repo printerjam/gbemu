@@ -795,6 +795,10 @@ impl Apu {
             }
         }
         self.ch1.timer = self.square_start(0, self.ch1.enabled);
+        if self.ch1.enabled {
+            // Restarting an active channel re-evaluates the duty output immediately.
+            self.ch1.out = DUTY[(self.regs[0x01] >> 6) as usize][self.ch1.pos as usize];
+        }
         self.ch1.env.trigger(self.regs[0x02]);
         self.ch1.shadow = self.regs[0x03] as u16 | ((self.regs[0x04] as u16 & 7) << 8);
         let period = (nr10 >> 4) & 7;
@@ -816,6 +820,9 @@ impl Apu {
             }
         }
         self.ch2.timer = self.square_start(5, self.ch2.enabled);
+        if self.ch2.enabled {
+            self.ch2.out = DUTY[(self.regs[0x06] >> 6) as usize][self.ch2.pos as usize];
+        }
         self.ch2.env.trigger(self.regs[0x07]);
         self.ch2.enabled = dac;
     }
