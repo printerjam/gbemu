@@ -952,4 +952,94 @@ mod tests {
         assert_eq!(p.framebuffer()[2 * 160], 0);
         assert_eq!(p.framebuffer()[160], 0x00FF_FFFF);
     }
+
+    fn cgb_ppu() -> Ppu {
+        let mut p = Ppu::new_cgb(true);
+        p.write_reg(0xFF40, 0);
+        p
+    }
+
+    fn set_bg_color(p: &mut Ppu, pal: u8, idx: u8, c: u16) {
+        p.write_reg(0xFF68, 0x80 | (pal * 8 + idx * 2));
+        p.write_reg(0xFF69, c as u8);
+        p.write_reg(0xFF69, (c >> 8) as u8);
+    }
+
+    #[test]
+    fn cgb_palette_auto_increment_and_conversion() {
+        let mut p = cgb_ppu();
+        set_bg_color(&mut p, 1, 2, 0x7FFF);
+        assert_eq!(p.read_reg(0xFF68), 0x40 | 0x80 | (8 + 6));
+        assert_eq!(p.bg_rgb[6], 0x00FF_FFFF);
+        set_bg_color(&mut p, 0, 1, 0x0001); // r=1 -> (1<<3)|(1>>2) = 8
+        assert_eq!(p.bg_rgb[1], 0x0008_0000);
+        set_bg_color(&mut p, 0, 3, 0x03E0 | 0x1F << 10); // g=31, b=31
+        assert_eq!(p.bg_rgb[3], 0x0000_FFFF);
+    }
+
+    #[test]
+    fn cgb_palette_and_vram_blocked_in_mode_3() {
+        let mut p = Ppu::new_cgb(true);
+        p.write_reg(0xFF40, 0);
+        p.write_reg(0xFF40, 0x91);
+        set_bg_color(&mut p, 0, 0, 0x1234);
+        run_to(&mut p, 5, 100);
+        assert_eq!(p.read_reg(0xFF41) & 3, 3);
+        p.write_reg(0xFF68, 0x00);
+        p.write_reg(0xFF69, 0xAA);
+        assert_eq!(p.read_reg(0xFF69), 0xFF);
+        run_to(&mut p, 5, 300);
+        p.write_reg(0xFF68, 0x00);
+        assert_eq!(p.read_reg(0xFF69), 0x34, "write during mode 3 must not land");
+    }
+
+    #[test]
+    fn cgb_bg_attributes_flip_bank_priority() {
+        let mut p = cgb_ppu();
+        // Bank 0 tile 1: leftmost pixel color 1 on every row; bank 1 tile 1: all color 2.
+        for r in 0..8 {
+            p.vram[16 + r * 2] = 0x80;
+            p.vram[0x2000 + 16 + r * 2 + 1] = 0xFF;
+        }
+        set_bg_color(&mut p, 3, 1, 0x001F); // red
+        set_bg_color(&mut p, 3, 2, 0x7C00); // blue
+        p.vram[0x1800] = 1;
+        p.vram[0x2000 + 0x1800] = 0x03 | 0x20; // palette 3, bank 0, x-flip
+        p.vram[0x1801] = 1;
+        p.vram[0x2000 + 0x1801] = 0x03 | 0x08; // palette 3, bank 1
+        p.write_reg(0xFF40, 0x91);
+        run_to(&mut p, 1, 300);
+        assert_eq!(
+            p.framebuffer()[7],
+            0x00FF_0000,
+            "x-flipped bank-0 pixel moves to the right edge"
+        );
+        assert_eq!(p.framebuffer()[0], p.bg_rgb[12], "flipped tile's left pixel is color 0");
+        assert_eq!(p.framebuffer()[8], 0x0000_00FF, "bank-1 tile is color 2 -> blue");
+    }
+
+    #[test]
+    fn cgb_sprite_priority_is_oam_order_not_x() {
+        let mut p = cgb_ppu();
+        for r in 0..8 {
+            p.vram[16 + r * 2] = 0xFF;
+        }
+        p.write_reg(0xFF6A, 0x80);
+        for c in [0u16, 0x001F, 0, 0, 0, 0x03E0] {
+            p.write_reg(0xFF6B, c as u8);
+            p.write_reg(0xFF6B, (c >> 8) as u8);
+        }
+        // Sprite 0 (OAM first) at x=12 uses palette 0 (red, color 1); sprite 1 at x=8 palette 1.
+        for (i, (x, pal)) in [(12u8, 0u8), (8, 1)].into_iter().enumerate() {
+            p.write_oam_dma(i as u8 * 4, 16);
+            p.write_oam_dma(i as u8 * 4 + 1, x);
+            p.write_oam_dma(i as u8 * 4 + 2, 1);
+            p.write_oam_dma(i as u8 * 4 + 3, pal);
+        }
+        p.write_reg(0xFF40, 0x93);
+        run_to(&mut p, 1, 300);
+        // Pixel 6 is covered by both sprites; OAM order picks sprite 0 (red) even though sprite 1 has lower X.
+        assert_eq!(p.framebuffer()[6], 0x00FF_0000);
+        assert_eq!(p.framebuffer()[2], p.obj_rgb[5]);
+    }
 }
