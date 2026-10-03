@@ -12,6 +12,9 @@ mod pipe;
 use pipe::Pipe;
 
 const DOTS_PER_LINE: u16 = 456;
+/// HDMA's HBlank request precedes the visible mode-0 entry by one M-cycle at single speed
+/// (gambatte `hdma_start_*`/`late_hdma_vs_*` boundary pairs); in double speed it coincides with it.
+const HBLANK_EARLY_SS: u16 = 4;
 const MODE3_RUNNING_MARK: u16 = 0xFF00;
 const LINES: u8 = 154;
 /// Dots at the start of a line during which the visible mode and LYC flag
@@ -91,6 +94,8 @@ pub struct Ppu {
     pipe: Pipe,
     /// Palette register whose OR-glitch value is replaced by the written value on the next dot.
     pal_fix: Option<(u8, u8)>,
+    /// CGB double speed (set by the bus): HDMA's HBlank request keeps its old (mode-0 visible) timing.
+    double_speed: bool,
     /// Mode sources seen by the last STAT line evaluation.
     stat_key: u8,
     sprites: [Sprite; 10],
@@ -170,6 +175,7 @@ impl Ppu {
             pipe: Pipe::default(),
             pal_fix: None,
             stat_key: 0,
+            double_speed: false,
             sprites: [Sprite::default(); 10],
             sprite_count: 0,
             wy_triggered: false,
@@ -260,6 +266,10 @@ impl Ppu {
 
     fn pal_locked(&self) -> bool {
         self.lcd_on() && self.mode == 3
+    }
+
+    pub fn set_double_speed(&mut self, ds: bool) {
+        self.double_speed = ds;
     }
 
     /// True while HDMA may start a block right away: HBlank on a visible line, or LCD off.
@@ -434,9 +444,13 @@ impl Ppu {
                 self.irq_mode = 0;
             } else if self.dot == self.mode0_dot + LINE_PREFIX {
                 self.mode = 0;
-                self.hblank_event = true;
                 self.unlock_all();
             }
+        }
+        if self.ly < 144
+            && self.dot + if self.double_speed { 0 } else { HBLANK_EARLY_SS } == self.mode0_dot + LINE_PREFIX
+        {
+            self.hblank_event = true;
         }
         if self.dot == LINE_PREFIX + 4 {
             self.vblank_oam_irq = false;

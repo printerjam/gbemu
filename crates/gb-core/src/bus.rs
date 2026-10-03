@@ -377,6 +377,7 @@ impl Bus {
         }
         self.key1_armed = false;
         self.double_speed = !self.double_speed;
+        self.ppu.set_double_speed(self.double_speed);
         self.ds_phase = false;
         self.timer.reset_div_speed_switch();
         self.int_flag |= self.timer.take_write_irq();
