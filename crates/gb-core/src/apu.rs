@@ -101,6 +101,9 @@ pub struct Apu {
     /// length counters cleared by power-off and locked while off.
     #[serde(default)]
     cgb: bool,
+    /// Cycle counter value when the APU was last powered on: the 1 MHz channel clock phase restarts there.
+    #[serde(skip)]
+    power_on_at: u64,
     /// Number of times the mixed output level changed (test-harness probe: "was the output silent/constant").
     #[serde(skip)]
     level_changes: u64,
@@ -153,6 +156,7 @@ impl Apu {
             wave_ram: [0; 16],
             sample_rate: 48_000,
             cgb: false,
+            power_on_at: 0,
             level_changes: 0,
             power: true,
             fs: 0,
@@ -381,6 +385,13 @@ impl Apu {
     fn square_period(&self, base: usize) -> u32 {
         let f = self.regs[base + 3] as u32 | ((self.regs[base + 4] as u32 & 7) << 8);
         (2048 - f) * 4
+    }
+
+    /// Time to the first duty step after a trigger: the period plus two ticks, rounded up to the next edge of
+    /// the 1 MHz channel clock (matters in double speed, where a CPU cycle is only 2 T).
+    fn square_start(&self, base: usize) -> u32 {
+        let t = self.square_period(base) + 8;
+        t + (4 - ((self.cycles.wrapping_sub(self.power_on_at) as u32 + t) & 3)) % 4
     }
 
     fn wave_period(&self) -> u32 {
@@ -682,6 +693,7 @@ impl Apu {
             self.power = false;
         } else {
             self.power = true;
+            self.power_on_at = self.cycles;
             self.fs = 0;
             self.ch1.pos = 0;
             self.ch2.pos = 0;
@@ -703,7 +715,7 @@ impl Apu {
                 self.ch1.len -= 1;
             }
         }
-        self.ch1.timer = self.square_period(0) + 8;
+        self.ch1.timer = self.square_start(0);
         self.ch1.env.trigger(self.regs[0x02]);
         self.ch1.shadow = self.regs[0x03] as u16 | ((self.regs[0x04] as u16 & 7) << 8);
         let period = (nr10 >> 4) & 7;
@@ -724,7 +736,7 @@ impl Apu {
                 self.ch2.len -= 1;
             }
         }
-        self.ch2.timer = self.square_period(5) + 8;
+        self.ch2.timer = self.square_start(5);
         self.ch2.env.trigger(self.regs[0x07]);
         self.ch2.enabled = dac;
     }
