@@ -368,7 +368,11 @@ impl Cartridge {
             }
             Kind::Mbc3 => match addr >> 13 {
                 0 => self.ram_enabled = val & 0xF == 0xA,
-                1 => self.rom_bank = if val & 0x7F == 0 { 1 } else { (val & 0x7F) as u16 },
+                1 => {
+                    // MBC30 (ROMs over 2 MiB) has an 8-bit ROM bank register, plain MBC3 has 7 bits.
+                    let mask = if self.rom.len() > 0x20_0000 { 0xFF } else { 0x7F };
+                    self.rom_bank = if val & mask == 0 { 1 } else { (val & mask) as u16 };
+                }
                 2 => self.aux = val,
                 _ => {
                     if let Some(rtc) = &mut self.rtc {
@@ -409,6 +413,15 @@ impl Cartridge {
         Some((bank * 0x2000 + off) % self.ram.len())
     }
 
+    /// Highest selectable RAM bank: 3 on MBC3, 7 on MBC30.
+    fn mbc3_max_ram_bank(&self) -> u8 {
+        if self.rom.len() > 0x20_0000 {
+            7
+        } else {
+            3
+        }
+    }
+
     fn rtc_select(&self) -> Option<u8> {
         if self.kind == Kind::Mbc3 && self.rtc.is_some() && (0x08..=0x0C).contains(&self.aux) {
             Some(self.aux)
@@ -435,7 +448,7 @@ impl Cartridge {
                 _ => r.dh,
             };
         }
-        if self.kind == Kind::Mbc3 && self.aux > 3 {
+        if self.kind == Kind::Mbc3 && self.aux > self.mbc3_max_ram_bank() {
             return 0xFF;
         }
         match self.ram_offset(addr) {
@@ -467,7 +480,7 @@ impl Cartridge {
             }
             return;
         }
-        if self.kind == Kind::Mbc3 && self.aux > 3 {
+        if self.kind == Kind::Mbc3 && self.aux > self.mbc3_max_ram_bank() {
             return;
         }
         if let Some(o) = self.ram_offset(addr) {
@@ -734,6 +747,19 @@ mod tests {
         assert_eq!(c.read_ram(0xA010), 0x42);
         c.write_rom(0x4000, 5); // invalid select
         assert_eq!(c.read_ram(0xA010), 0xFF);
+    }
+
+    #[test]
+    fn mbc30_wide_banks() {
+        let mut c = cart(0x13, 256, 5);
+        c.write_rom(0x2000, 0xC8);
+        assert_eq!(lo(&c, 0x5000), 0xC8);
+        c.write_rom(0, 0x0A);
+        c.write_rom(0x4000, 6);
+        c.write_ram(0xA000, 0x66);
+        assert_eq!(c.read_ram(0xA000), 0x66);
+        c.write_rom(0x4000, 4);
+        assert_eq!(c.read_ram(0xA000), 0);
     }
 
     fn rtc_cart() -> Cartridge {

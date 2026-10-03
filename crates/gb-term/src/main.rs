@@ -166,7 +166,9 @@ fn main() {
         // Fit to the real terminal when interactive; headless dumps use the native 160x72 cells
         // (crossterm's size() falls back to 80x24 via tput instead of failing without a tty).
         let (cols, rows) = if interactive {
-            terminal::size().map(|(c, r)| (c as usize, r as usize)).unwrap_or((usize::MAX, usize::MAX))
+            terminal::size()
+                .map(|(c, r)| (c as usize, r as usize))
+                .unwrap_or((usize::MAX, usize::MAX))
         } else {
             (usize::MAX, usize::MAX)
         };
