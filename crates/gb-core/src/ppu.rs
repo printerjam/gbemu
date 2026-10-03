@@ -90,6 +90,8 @@ pub struct Ppu {
     pipe: Pipe,
     /// Palette register whose OR-glitch value is replaced by the written value on the next dot.
     pal_fix: Option<(u8, u8)>,
+    /// Mode sources seen by the last STAT line evaluation.
+    stat_key: u8,
     sprites: [Sprite; 10],
     sprite_count: usize,
     wy_triggered: bool,
@@ -166,6 +168,7 @@ impl Ppu {
             mode0_dot: 0,
             pipe: Pipe::default(),
             pal_fix: None,
+            stat_key: 0,
             sprites: [Sprite::default(); 10],
             sprite_count: 0,
             wy_triggered: false,
@@ -411,7 +414,12 @@ impl Ppu {
         if let Some((i, v)) = self.pal_fix.take() {
             self.regs[i as usize] = v;
         }
-        self.update_stat_line();
+        // The STAT line only changes with the mode sources or around line starts (LY/LYC compare).
+        let key = self.irq_mode | (self.vblank_oam_irq as u8) << 2;
+        if self.dot <= 8 || key != self.stat_key {
+            self.stat_key = key;
+            self.update_stat_line();
+        }
     }
 
     fn sprite_height(&self) -> u8 {

@@ -64,9 +64,13 @@ struct Pending {
     obj_en: bool,
 }
 
-fn env_delay(name: &str, default: u16) -> u16 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
+/// Dots after a pixel's pop at which LCDC.0 / LCDC.1 are sampled for it.
+const BG_EN_DELAY: u16 = 6;
+const OBJ_EN_DELAY: u16 = 6;
+/// Fetcher step (1-6) at which the tile index, low and high byte are read.
+const TILE_INDEX_STEP: u8 = 4;
+const TILE_LO_STEP: u8 = 4;
+const TILE_HI_STEP: u8 = 6;
 
 #[derive(Default, Serialize, Deserialize)]
 pub(super) struct Pipe {
@@ -99,9 +103,6 @@ pub(super) struct Pipe {
     stall: u8,
     wait: u8,
     group: (u8, u8),
-    /// A sprite stall ended since the last BG push: the next tile fetch starts late.
-    post_sprite: bool,
-    fetch_hold: u8,
     /// Popped pixels waiting for their palette lookup (`MIX_DELAY` dots after the pop).
     delay: [Pending; 8],
     delay_head: u8,
@@ -206,7 +207,6 @@ impl Ppu {
                 return;
             }
             self.merge_sprites();
-            self.pipe.post_sprite = true;
             self.pop();
             return;
         }
@@ -221,17 +221,9 @@ impl Ppu {
     }
 
     fn fetch_step(&mut self, push: bool) {
-        if self.pipe.fetch_hold > 0 {
-            self.pipe.fetch_hold -= 1;
-            return;
-        }
         if self.pipe.prog < FETCH_STEPS {
             self.pipe.prog += 1;
-            let (ti, lo, hi) = (
-                env_delay("GB_TI", 4) as u8,
-                env_delay("GB_LO", 4) as u8,
-                env_delay("GB_HI", 6) as u8,
-            );
+            let (ti, lo, hi) = (TILE_INDEX_STEP, TILE_LO_STEP, TILE_HI_STEP);
             if self.pipe.prog == ti {
                 self.fetch_tile_index();
             }
@@ -246,10 +238,6 @@ impl Ppu {
             self.push_row();
             self.pipe.prog = 1;
             self.pipe.k = self.pipe.k.wrapping_add(1);
-            if self.pipe.post_sprite {
-                self.pipe.post_sprite = false;
-                self.pipe.fetch_hold = env_delay("GB_HOLD", 0) as u8;
-            }
         }
     }
 
@@ -303,6 +291,9 @@ impl Ppu {
     /// the fetcher restarts on window tiles).
     fn try_start_window(&mut self) -> bool {
         let lcdc = self.regs[LCDC];
+        if lcdc & 0x20 != 0 && self.ly == self.regs[WY] {
+            self.wy_triggered = true;
+        }
         if self.pipe.win || !self.wy_triggered || lcdc & 0x20 == 0 || (!self.cgb_mode() && lcdc & 1 == 0) {
             return false;
         }
@@ -405,8 +396,8 @@ impl Ppu {
             obj,
             x,
             due: p.cyc + MIX_DELAY,
-            bg_en_due: p.cyc + env_delay("GB_BGEN", 6),
-            obj_en_due: p.cyc + env_delay("GB_OBJEN", 6),
+            bg_en_due: p.cyc + BG_EN_DELAY,
+            obj_en_due: p.cyc + OBJ_EN_DELAY,
             bg_en: true,
             obj_en: true,
         };
@@ -424,7 +415,6 @@ impl Ppu {
 
     fn mix(&self, e: Pending) -> u32 {
         let (bg, obj) = (e.bg, e.obj);
-        let lcdc = self.regs[LCDC];
         let cgb = self.cgb_mode();
         let bg_id = if !cgb && !e.bg_en { 0 } else { bg.color };
         let obj_visible = e.obj_en && obj.color != 0;
