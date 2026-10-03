@@ -136,6 +136,12 @@ Both frontends keep about 20 seconds of history (a snapshot every 4 frames, stor
 hundred bytes each for typical scenes). Hold the rewind key to run time backwards at 4x; release to continue from
 that point. Library API: `gb_core::Rewind`.
 
+### Cheats
+
+`gbemu` and `gbterm` accept `--cheat CODE` (repeatable). Game Genie codes (`ABC-DEF-GHI`, or `ABC-DEF` without
+compare byte) patch ROM reads; GameShark codes (`01VVLLHH`, RAM addresses A000-DFFF) are written once per frame.
+Cheats are a host setting: they are not stored in save states. Library API: `GameBoy::add_cheat` / `clear_cheats`.
+
 ### Scripted input (`gbemu --input-script FILE`)
 
 One action per line, `#` starts a comment; the frame number counts displayed frames:
@@ -171,6 +177,7 @@ with the reference screenshot.
 ### CPU trace and Gameboy Doctor
 
 ```sh
+target/release/gbtest bench game.gb --frames 3000          # headless speed; scripts/bench.sh runs a small table
 target/release/gbtest trace game.gb --steps 100             # disassembly + registers per instruction
 target/release/gbtest trace game.gb --doctor --steps 1000   # Gameboy Doctor log format (LY reads as 0x90)
 scripts/doctor.sh 4                                         # diff blargg cpu_instrs/individual/04 against the truth log

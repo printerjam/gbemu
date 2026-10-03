@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 const USAGE: &str =
     "usage: gbterm <rom.gb> [--palette gray|dmg-green|pocket] [--model dmg|cgb|auto] [--exit-after-frames N] \
-[--dump-frame-ansi FILE]
+[--dump-frame-ansi FILE] [--cheat CODE]...
 
 keys: arrows/WASD d-pad, X/K = A, Z/J = B, Enter = Start, Backspace/Shift+Tab = Select, P pause, Q/Esc quit
        F1 or [ = save state, F2 or ] = load state (slot 1: <rom>.ss1), hold R = rewind";
@@ -28,6 +28,7 @@ const FPS: f64 = 59.7275;
 
 struct Args {
     rom: PathBuf,
+    cheats: Vec<String>,
     palette: Palette,
     model: Option<gb_core::Model>,
     exit_after: Option<u64>,
@@ -43,6 +44,7 @@ fn parse_args() -> Args {
     let mut rom = None;
     let mut a = Args {
         rom: PathBuf::new(),
+        cheats: Vec::new(),
         palette: Palette::Gray,
         model: None,
         exit_after: None,
@@ -63,6 +65,11 @@ fn parse_args() -> Args {
             "--exit-after-frames" => {
                 let v = val("--exit-after-frames");
                 a.exit_after = Some(v.parse().unwrap_or_else(|_| fail(&format!("bad frame count '{v}'"))));
+            }
+            "--cheat" => {
+                let v = val("--cheat");
+                gb_core::Cheat::parse(&v).unwrap_or_else(|e| fail(&e.to_string()));
+                a.cheats.push(v);
             }
             "--dump-frame-ansi" => a.dump = Some(val("--dump-frame-ansi").into()),
             "-h" | "--help" => {
@@ -168,6 +175,9 @@ fn main() {
     let rom = std::fs::read(&args.rom).unwrap_or_else(|e| fail(&format!("{}: {e}", args.rom.display())));
     let mut gb = GameBoy::with_model_choice(rom, args.model)
         .unwrap_or_else(|e| fail(&format!("{}: cartridge error: {e:?}", args.rom.display())));
+    for c in &args.cheats {
+        gb.add_cheat(c).unwrap_or_else(|e| fail(&e.to_string()));
+    }
     let sav = sav_path(&args.rom);
     if gb.cartridge().has_battery() {
         if let Ok(data) = std::fs::read(&sav) {
