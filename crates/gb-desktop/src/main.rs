@@ -219,6 +219,8 @@ fn run(args: Args) -> Result<(), String> {
     let frame_dur = Duration::from_secs_f64(CYCLES_PER_FRAME as f64 / CLOCK_HZ as f64);
     let mut deadline = Instant::now();
     let mut last_save = Instant::now();
+    let audio_debug = std::env::var_os("GBEMU_AUDIO_DEBUG").is_some();
+    let (mut dbg_at, mut dbg_frames) = (Instant::now(), 0u64);
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         if window.is_key_pressed(Key::P, KeyRepeat::No) {
@@ -281,6 +283,22 @@ fn run(args: Args) -> Result<(), String> {
             }
         }
 
+        if audio_debug && dbg_at.elapsed() >= Duration::from_secs(1) {
+            let secs = dbg_at.elapsed().as_secs_f64();
+            let (fill, played, under) = audio.as_ref().map_or((0, 0, 0), |a| {
+                (
+                    a.fill_frames(),
+                    a.stats.played.load(std::sync::atomic::Ordering::Relaxed),
+                    a.stats.underrun.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            });
+            eprintln!(
+                "audio: {:.2} fps, ring fill {fill} frames, device consumed {played}, underrun {under}",
+                (frames - dbg_frames) as f64 / secs
+            );
+            dbg_at = Instant::now();
+            dbg_frames = frames;
+        }
         if args.screenshot_at == Some(frames) {
             let path = args.screenshot.as_ref().unwrap();
             save_screenshot(path, &shades)?;

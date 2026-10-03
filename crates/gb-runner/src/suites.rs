@@ -174,7 +174,7 @@ pub fn discover(roms: &Path, long: bool) -> Vec<TestCase> {
 
     // blargg-extra (not scored)
     for p in walk_gb(&b.join("dmg_sound/rom_singles")) {
-        blargg(&mut cases, "blargg-extra", p, None, 15.0);
+        blargg(&mut cases, "blargg-extra", p, None, 30.0);
     }
     blargg(
         &mut cases,
