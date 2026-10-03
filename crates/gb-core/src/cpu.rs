@@ -113,6 +113,11 @@ impl Cpu {
         self.ei_pending = false;
         bus.tick();
         bus.tick();
+        // EI;HALT with an interrupt pending: the halt bug makes the return address the HALT itself.
+        if self.halt_bug {
+            self.halt_bug = false;
+            self.regs.pc = self.regs.pc.wrapping_sub(1);
+        }
         let pc = self.regs.pc;
         self.regs.sp = self.regs.sp.wrapping_sub(1);
         bus.write(self.regs.sp, (pc >> 8) as u8);
