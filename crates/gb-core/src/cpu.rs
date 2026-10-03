@@ -30,6 +30,8 @@ pub trait CpuBus {
     /// Called before every instruction, interrupt dispatch or halted idle cycle: the point where a pending
     /// HBlank DMA block takes the bus.
     fn instruction_boundary(&mut self) {}
+    /// The CPU entered (`true`) or left (`false`) HALT.
+    fn halt_changed(&mut self, _halted: bool) {}
     /// STOP executed. The bus performs a CGB speed switch if one is armed.
     fn stop(&mut self) {}
     /// `IE & IF & 0x1F`: interrupts requested and enabled.
@@ -137,6 +139,7 @@ impl Cpu {
                 return None;
             }
             self.halted = false;
+            bus.halt_changed(false);
         }
         if self.ime && bus.pending_interrupts() != 0 {
             self.dispatch_interrupt(bus);
@@ -372,6 +375,7 @@ impl Cpu {
                     }
                 } else {
                     self.halted = true;
+                    bus.halt_changed(true);
                 }
             }
             0x01 | 0x11 | 0x21 | 0x31 => {

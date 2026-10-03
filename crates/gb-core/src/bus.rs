@@ -70,6 +70,12 @@ pub struct Bus {
     hdma: Hdma,
     /// HBlank started since the last instruction boundary.
     hdma_due: bool,
+    /// CPU in HALT: HBlank blocks wait for the wake-up.
+    halted: bool,
+    /// At HALT entry the HDMA was already inside its HBlank period (that block is not repeated on wake-up).
+    halt_in_hdma_period: bool,
+    /// A block was requested but not yet served when HALT began: serve it on wake-up.
+    halt_hdma_requested: bool,
     /// FF56 (infrared port) and FF72-FF75 scratch registers.
     rp: u8,
     undoc: [u8; 4],
@@ -134,6 +140,9 @@ impl Bus {
             key1_armed: false,
             ds_phase: false,
             hdma_due: false,
+            halted: false,
+            halt_in_hdma_period: false,
+            halt_hdma_requested: false,
             hdma: Hdma {
                 src: 0,
                 dst: 0,
@@ -167,7 +176,7 @@ impl Bus {
     /// An HBlank DMA block that became due takes the bus at the next instruction boundary (the instruction in
     /// progress, including its own access, completes first).
     fn run_due_hdma(&mut self) {
-        if self.hdma_due {
+        if self.hdma_due && !self.halted {
             self.hdma_due = false;
             if self.hdma.active {
                 self.hdma_block(true);
@@ -543,6 +552,21 @@ impl CpuBus for Bus {
 
     fn tick(&mut self) {
         self.tick_m();
+    }
+
+    fn halt_changed(&mut self, halted: bool) {
+        // gambatte haltHdmaState: HBlank DMA does not run while the CPU is halted. A block that was already
+        // requested at HALT entry runs on wake-up; so does one whose HBlank began during the halt.
+        if halted {
+            self.halted = true;
+            self.halt_in_hdma_period = self.hdma.active && self.ppu.in_hblank();
+            self.halt_hdma_requested = self.hdma_due;
+            self.hdma_due = false;
+        } else {
+            self.halted = false;
+            self.hdma_due =
+                self.hdma.active && (self.halt_hdma_requested || (self.ppu.in_hblank() && !self.halt_in_hdma_period));
+        }
     }
 
     fn instruction_boundary(&mut self) {
