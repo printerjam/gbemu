@@ -426,6 +426,10 @@ impl CpuBus for Bus {
         self.poke(addr, val);
     }
 
+    fn double_speed(&self) -> bool {
+        self.double_speed
+    }
+
     fn tick_idu(&mut self, addr: u16) {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Write);

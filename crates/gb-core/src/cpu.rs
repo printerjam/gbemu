@@ -23,6 +23,10 @@ pub trait CpuBus {
     fn tick_idu(&mut self, _addr: u16) {
         self.tick();
     }
+    /// CGB double-speed mode is active (the interrupt acknowledge point is only calibrated for normal speed).
+    fn double_speed(&self) -> bool {
+        false
+    }
     /// STOP executed. The bus performs a CGB speed switch if one is armed.
     fn stop(&mut self) {}
     /// `IE & IF & 0x1F`: interrupts requested and enabled.
@@ -159,15 +163,20 @@ impl Cpu {
         bus.write(self.regs.sp, (pc >> 8) as u8);
         // IE may have been modified by the push; re-evaluate which source wins.
         let pending = bus.pending_interrupts();
-        let vector = if pending == 0 {
-            0x0000
-        } else {
-            let bit = pending.trailing_zeros() as u16;
+        let source = (pending != 0).then(|| pending.trailing_zeros() as u16);
+        let vector = source.map_or(0x0000, |bit| 0x0040 + bit * 8);
+        // Normal speed: the IF bit is cleared after the low byte went out, so a push landing on IF (SP=0xFF10)
+        // cannot resurrect it (gambatte irq_precedence/late_if_via_sp_if, *_late_retrigger_2). In double speed
+        // the early acknowledge matches *_ds_1 instead; the finer-grained ds acknowledge point is not modelled.
+        let early = bus.double_speed();
+        if let (Some(bit), true) = (source, early) {
             bus.ack_interrupt(1 << bit);
-            0x0040 + bit * 8
-        };
+        }
         self.regs.sp = self.regs.sp.wrapping_sub(1);
         bus.write(self.regs.sp, pc as u8);
+        if let (Some(bit), false) = (source, early) {
+            bus.ack_interrupt(1 << bit);
+        }
         bus.tick();
         self.regs.pc = vector;
     }
