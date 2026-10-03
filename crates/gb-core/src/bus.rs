@@ -20,6 +20,8 @@ struct Dma {
     active: Option<(u8, u16)>,
     /// Requested transfer and M-cycles until it takes over.
     pending: Option<(u8, u16)>,
+    /// Byte a CPU write drove onto the DMA's bus; the transfer in progress copies it instead of the source.
+    forced: Option<u8>,
 }
 
 /// CGB VRAM DMA (FF51-FF55).
@@ -36,8 +38,11 @@ struct Hdma {
 /// Internal divider value when the CGB boot ROM hands over (mooneye boot_div-cgbABCDE).
 const CGB_POST_BOOT_DIV: u16 = 0x2674;
 
-/// M-cycles a speed switch keeps the CPU stopped.
-const SPEED_SWITCH_M_CYCLES: u32 = 2050;
+/// Dots before the end of a line after which enabling HDMA no longer catches that line's HBlank.
+const HDMA_ENABLE_CUTOFF: u16 = 3;
+
+/// M-cycles a speed switch keeps the CPU stopped: 2^17 CPU clocks in either direction (age-cgb spsw-tima).
+const SPEED_SWITCH_M_CYCLES: u32 = 0x8000;
 
 #[derive(Serialize, Deserialize)]
 pub struct Bus {
@@ -53,13 +58,18 @@ pub struct Bus {
     /// The divider has been written since power-on: from then on the model counter and the hardware counter agree,
     /// so the DMG serial-edge look-ahead no longer applies (gambatte serial/div_write_*).
     div_synced: bool,
+    /// Cheat codes: host setting, not machine state.
+    #[serde(skip)]
+    pub cheats: crate::cheats::Cheats,
     cgb: bool,
     double_speed: bool,
     /// KEY1 bit 0: speed switch armed for the next STOP.
     key1_armed: bool,
-    /// Alternates in double speed so DMA/cartridge run every second M-cycle.
+    /// Alternates in double speed so the cartridge clock runs every second M-cycle.
     ds_phase: bool,
     hdma: Hdma,
+    /// HBlank started during the current M-cycle; the block runs once its access is done.
+    hdma_due: bool,
     /// FF56 (infrared port) and FF72-FF75 scratch registers.
     rp: u8,
     undoc: [u8; 4],
@@ -112,10 +122,12 @@ impl Bus {
             wram: vec![0; 0x8000],
             svbk: 1,
             div_synced: false,
+            cheats: Default::default(),
             cgb,
             double_speed: false,
             key1_armed: false,
             ds_phase: false,
+            hdma_due: false,
             hdma: Hdma {
                 src: 0,
                 dst: 0,
@@ -131,6 +143,7 @@ impl Bus {
                 reg: 0xFF,
                 active: None,
                 pending: None,
+                forced: None,
             },
             cycles: 0,
         }
@@ -140,9 +153,19 @@ impl Bus {
     /// HBlank DMA block steal the bus.
     pub fn tick_m(&mut self) {
         self.tick_cycle();
-        let hblank = self.ppu.take_hblank();
-        if hblank && self.hdma.active {
-            self.hdma_block();
+        if self.ppu.take_hblank() && self.hdma.active {
+            self.hdma_due = true;
+        }
+    }
+
+    /// An HBlank DMA block that became due during the M-cycle just executed takes the bus now, after the
+    /// CPU's own access of that cycle (it never sees the transferred data early).
+    fn finish_cycle(&mut self) {
+        if self.hdma_due {
+            self.hdma_due = false;
+            if self.hdma.active {
+                self.hdma_block(true);
+            }
         }
     }
 
@@ -163,6 +186,8 @@ impl Bus {
         irqs |= self.ppu.tick(dots);
         self.apu.tick(dots);
         self.int_flag |= irqs;
+        // OAM DMA runs on the CPU clock (one byte per M-cycle even in double speed).
+        self.tick_dma();
         if self.double_speed {
             self.ds_phase = !self.ds_phase;
             if self.ds_phase {
@@ -170,7 +195,6 @@ impl Bus {
             }
         }
         self.cart.tick();
-        self.tick_dma();
     }
 
     /// APU frame sequencer steps on the falling edge of DIV bit 12 (bit 13 in double speed).
@@ -183,7 +207,14 @@ impl Bus {
 
     fn tick_dma(&mut self) {
         if let Some((index, src)) = self.dma.active {
-            let val = self.dma_source_read(src + index as u16);
+            let mut val = self.dma_source_read(src + index as u16);
+            if let Some(forced) = self.dma.forced.take() {
+                val = if !self.cgb && src + index as u16 >= 0xC000 {
+                    val & forced
+                } else {
+                    forced
+                };
+            }
             self.ppu.write_oam_dma(index, val);
             self.dma.active = if index < 159 { Some((index + 1, src)) } else { None };
         }
@@ -199,7 +230,7 @@ impl Bus {
 
     /// Copy one 16-byte HDMA/GDMA block. The CPU is stalled for 8 M-cycles
     /// (16 in double speed) while the PPU and timers keep running.
-    fn hdma_block(&mut self) {
+    fn hdma_block(&mut self, trailing_cycle: bool) {
         let m_cycles = if self.double_speed { 16 } else { 8 };
         for i in 0..m_cycles {
             self.tick_cycle();
@@ -216,6 +247,10 @@ impl Bus {
         if self.hdma.len == 0x7F {
             self.hdma.active = false;
         }
+        if trailing_cycle {
+            // The transfer unit hands the bus back one M-cycle after the last byte (gambatte dma()).
+            self.tick_cycle();
+        }
         self.ppu.take_hblank();
     }
 
@@ -230,12 +265,13 @@ impl Bus {
         if val & 0x80 == 0 {
             self.hdma.active = true;
             while self.hdma.active {
-                self.hdma_block();
+                self.hdma_block(self.hdma.len == 0);
             }
         } else {
             self.hdma.active = true;
-            if self.ppu.in_hblank() {
-                self.hdma_block();
+            // Enabling right at the end of HBlank misses it: the next line's HBlank starts the transfer.
+            if self.ppu.in_hblank() && self.ppu.dot() + HDMA_ENABLE_CUTOFF < 456 {
+                self.hdma_block(true);
             }
         }
     }
@@ -309,7 +345,8 @@ impl Bus {
         self.key1_armed = false;
         self.double_speed = !self.double_speed;
         self.ds_phase = false;
-        self.poke(0xFF04, 0);
+        self.timer.reset_div_speed_switch();
+        self.int_flag |= self.timer.take_write_irq();
         for _ in 0..SPEED_SWITCH_M_CYCLES {
             self.tick_cycle();
         }
@@ -325,10 +362,37 @@ impl Bus {
         self.dma.active.is_some()
     }
 
+    /// Which memory bus an address sits on while OAM DMA runs: DMG has an external bus (cartridge and
+    /// WRAM) and a video bus; CGB additionally gives WRAM its own bus.
+    fn dma_bus_class(&self, addr: u16) -> Option<u8> {
+        match addr {
+            0x8000..=0x9FFF => Some(1),
+            0xC000..=0xFDFF if self.cgb => Some(2),
+            0x0000..=0x7FFF | 0xA000..=0xFDFF => Some(0),
+            _ => None,
+        }
+    }
+
+    /// The byte on the bus when the CPU touches `addr` in the same M-cycle as a DMA transfer.
+    fn dma_conflict(&self, addr: u16) -> Option<u8> {
+        let (index, base) = self.dma.active?;
+        let src = base + index as u16;
+        let class = self.dma_bus_class(addr)?;
+        (self.dma_bus_class(if src >= 0xE000 { src - 0x2000 } else { src })? == class)
+            .then(|| self.dma_source_read(src))
+    }
+
     /// Side-effect-free read (no clock advance); also used by debuggers.
     pub fn peek(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x7FFF => self.cart.read_rom(addr),
+            0x0000..=0x7FFF => {
+                let v = self.cart.read_rom(addr);
+                if self.cheats.has_genie() {
+                    self.cheats.patch_rom(addr, v)
+                } else {
+                    v
+                }
+            }
             0x8000..=0x9FFF => self.ppu.read_vram(addr),
             0xA000..=0xBFFF => self.cart.read_ram(addr),
             0xC000..=0xFDFF => self.wram[self.wram_index(addr)],
@@ -339,7 +403,13 @@ impl Bus {
                     self.ppu.read_oam(addr)
                 }
             }
-            0xFEA0..=0xFEFF => 0x00,
+            0xFEA0..=0xFEFF => {
+                if self.dma_blocks_oam() {
+                    0xFF
+                } else {
+                    0x00
+                }
+            }
             0xFF00 => self.joypad.read(),
             0xFF01..=0xFF02 => self.serial.read(addr),
             0xFF04..=0xFF07 => self.timer.read(addr),
@@ -418,19 +488,32 @@ impl CpuBus for Bus {
     fn read(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Read);
-        self.peek(addr)
+        let v = self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr));
+        self.finish_cycle();
+        v
     }
 
     fn read_idu(&mut self, addr: u16) -> u8 {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::ReadInc);
-        self.peek(addr)
+        let v = self.dma_conflict(addr).unwrap_or_else(|| self.peek(addr));
+        self.finish_cycle();
+        v
     }
 
     fn write(&mut self, addr: u16, val: u8) {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Write);
-        self.poke(addr, val);
+        if self.dma_conflict(addr).is_some() {
+            // The DMA latches what the two bus drivers produce: the CPU's data, wired-ANDed with the source
+            // byte when that comes from DMG WRAM; CGB WRAM sources are not disturbed at all.
+            if !self.cgb || self.dma.active.is_some_and(|(i, base)| base + (i as u16) < 0xC000) {
+                self.dma.forced = Some(val);
+            }
+        } else {
+            self.poke(addr, val);
+        }
+        self.finish_cycle();
     }
 
     fn double_speed(&self) -> bool {
@@ -440,10 +523,12 @@ impl CpuBus for Bus {
     fn tick_idu(&mut self, addr: u16) {
         self.tick_m();
         self.oam_bug(addr, oam_bug::Kind::Write);
+        self.finish_cycle();
     }
 
     fn tick(&mut self) {
         self.tick_m();
+        self.finish_cycle();
     }
 
     fn stop(&mut self) {

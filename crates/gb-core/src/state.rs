@@ -12,7 +12,7 @@ use std::vec::Vec;
 
 const MAGIC: &[u8; 4] = b"GBST";
 /// Bump whenever the serialized layout of any core struct changes.
-pub const STATE_VERSION: u32 = 3;
+pub const STATE_VERSION: u32 = 4;
 const HEADER_LEN: usize = 4 + 4 + 1 + 2 + 4 + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +99,7 @@ impl GameBoy {
         if new.bus.apu.sample_rate() != self.bus.apu.sample_rate() {
             new.bus.apu.set_sample_rate(self.bus.apu.sample_rate());
         }
+        new.bus.cheats = std::mem::take(&mut self.bus.cheats);
         *self = new;
         Ok(())
     }

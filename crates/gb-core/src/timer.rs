@@ -78,6 +78,22 @@ impl Timer {
         }
     }
 
+    /// DIV reset performed by a CGB speed switch (CPU CGB-C). The immediate TIMA increment is decided on the
+    /// divider as it was one M-cycle before the reset for the 4 KHz setting and as it is for the faster ones
+    /// (gambatte speedchange_tima0*: 16 tests; age-cgb spsw-tima-cgbBC wants every setting one M-cycle later).
+    pub fn reset_div_speed_switch(&mut self) {
+        let sampled = if self.tac & 3 == 0 {
+            self.div.wrapping_sub(4)
+        } else {
+            self.div
+        };
+        let before = self.signal_at(sampled);
+        self.div = 0;
+        if before {
+            self.increment_from_write();
+        }
+    }
+
     /// IF bits raised by the last register write.
     pub fn take_write_irq(&mut self) -> u8 {
         std::mem::take(&mut self.write_irq)

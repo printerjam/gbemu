@@ -65,6 +65,25 @@ impl GameBoy {
                 break;
             }
         }
+        self.apply_gameshark();
+    }
+
+    /// Install a cheat code (Game Genie `ABC-DEF-GHI` / `ABC-DEF`, or GameShark `01VVLLHH`).
+    pub fn add_cheat(&mut self, code: &str) -> Result<(), crate::CheatError> {
+        self.bus.cheats.add(crate::Cheat::parse(code)?);
+        Ok(())
+    }
+
+    pub fn clear_cheats(&mut self) {
+        self.bus.cheats.clear();
+    }
+
+    /// GameShark codes write once per frame (at VBlank).
+    fn apply_gameshark(&mut self) {
+        for i in 0..self.bus.cheats.shark().len() {
+            let s = self.bus.cheats.shark()[i];
+            self.bus.poke(s.addr, s.value);
+        }
     }
 
     /// 160x144 pixels, 0x00RRGGBB.

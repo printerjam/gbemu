@@ -1,5 +1,6 @@
 //! `gbtest`: headless test-ROM runner and project scoreboard.
 
+mod bench;
 mod exec;
 mod extra;
 mod image;
@@ -18,7 +19,8 @@ const USAGE: &str = "\
 usage:
   gbtest [--roms DIR] [--suite NAME]... [--filter SUBSTR] [-j N] [--long] [--wall SECS]
          [--markdown] [--json] [--screenshots DIR] [--list]
-  gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--wav out.wav] [--until-ldbb] [--model dmg|cgb|auto]
+  gbtest run <rom> [--seconds N] [--frames N] [--screenshot out.png] [--wav out.wav] [--until-ldbb] [--model dmg|cgb|auto] [--peek HEXADDR[+LEN]]... [--until-pc HEXADDR]
+  gbtest bench <rom> [--frames N] [--model dmg|cgb|auto]
   gbtest trace <rom> [--steps N] [--doctor]
 
 suites: blargg, mooneye, mooneye-mbc, acid2, mbc3, cgb (scored); every other suite is not scored; see --list
@@ -104,6 +106,11 @@ fn main() {
     if args.peek().map(String::as_str) == Some("run") {
         args.next();
         run_single(args);
+        return;
+    }
+    if args.peek().map(String::as_str) == Some("bench") {
+        args.next();
+        bench::run(args);
         return;
     }
     if args.peek().map(String::as_str) == Some("trace") {
@@ -386,8 +393,30 @@ fn run_single(mut args: impl Iterator<Item = String>) {
     let (mut seconds, mut frames, mut shot, mut until) = (10.0f64, None::<u64>, None::<PathBuf>, false);
     let mut model = None;
     let mut wav: Option<PathBuf> = None;
+    let mut peeks: Vec<(u16, u16)> = Vec::new();
+    let mut until_pc: Option<u16> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--until-pc" => {
+                let v = value(&mut args, &a);
+                until_pc = Some(
+                    u16::from_str_radix(v.trim_start_matches("0x"), 16)
+                        .unwrap_or_else(|_| usage_error(&format!("bad --until-pc '{v}'"))),
+                );
+            }
+            "--peek" => {
+                let v = value(&mut args, &a);
+                let (addr, len) = v.split_once('+').unwrap_or((&v, "16"));
+                let hex = |t: &str| {
+                    u16::from_str_radix(t.trim_start_matches("0x"), 16)
+                        .unwrap_or_else(|_| usage_error(&format!("bad --peek '{v}'")))
+                };
+                peeks.push((
+                    hex(addr),
+                    len.parse()
+                        .unwrap_or_else(|_| usage_error(&format!("bad --peek '{v}'"))),
+                ));
+            }
             "--seconds" => seconds = parse(&value(&mut args, &a), &a),
             "--frames" => frames = Some(parse(&value(&mut args, &a), &a)),
             "--screenshot" => shot = Some(value(&mut args, &a).into()),
@@ -415,6 +444,10 @@ fn run_single(mut args: impl Iterator<Item = String>) {
     let mut audio: Vec<f32> = Vec::new();
     let mut why = "time limit";
     while gb.cycles() < limit {
+        if until_pc == Some(gb.registers().pc) {
+            why = "PC reached";
+            break;
+        }
         if gb.step() == Some(0x40) && until {
             why = "LD B,B";
             break;
@@ -426,6 +459,15 @@ fn run_single(mut args: impl Iterator<Item = String>) {
     if let Some(p) = &wav {
         gb.drain_audio(&mut audio);
         write_wav(p, &audio, WAV_RATE);
+    }
+    if until_pc.is_some() {
+        println!(
+            "div_counter={:04X} cycles={} ly={} dot={}",
+            gb.bus.timer.div_counter(),
+            gb.cycles(),
+            gb.bus.ppu.read_reg(0xFF44),
+            gb.bus.ppu.dot()
+        );
     }
     let serial = String::from_utf8_lossy(gb.serial_output()).into_owned();
     println!(
@@ -439,6 +481,14 @@ fn run_single(mut args: impl Iterator<Item = String>) {
         "A={:02X} F={:02X} B={:02X} C={:02X} D={:02X} E={:02X} H={:02X} L={:02X} SP={:04X} PC={:04X}",
         r.a, r.f, r.b, r.c, r.d, r.e, r.h, r.l, r.sp, r.pc
     );
+    for (addr, len) in peeks {
+        for row in (0..len).step_by(16) {
+            let bytes: Vec<String> = (row..len.min(row + 16))
+                .map(|i| format!("{:02X}", gb.bus.peek(addr.wrapping_add(i))))
+                .collect();
+            println!("{:04X}: {}", addr.wrapping_add(row), bytes.join(" "));
+        }
+    }
     if let Some(p) = shot {
         match image::save_png(&p, gb.framebuffer(), SCREEN_WIDTH, SCREEN_HEIGHT) {
             Ok(()) => println!("screenshot: {}", p.display()),

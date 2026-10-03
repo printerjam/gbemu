@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>gbemu</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1b1d22">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -21,10 +25,17 @@
   #hint { position: absolute; inset: 0 8px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px; pointer-events: none; color: #9aa; }
   #status { min-height: 1.4em; font-size: 12px; color: #8a8f9c; padding: 4px 8px; text-align: center; }
   body.drag main canvas { outline: 3px dashed #6aa0ff; }
+  #cheats { display: none; width: min(100vw, 640px); padding: 0 8px 8px; }
+  #cheats.open { display: block; }
+  #cheats textarea { width: 100%; height: 5.5em; background: #23262d; color: inherit; border: 1px solid #454956; border-radius: 6px; padding: 6px; font: 12px/1.4 ui-monospace, monospace; resize: vertical; user-select: text; -webkit-user-select: text; }
+  #cheats .row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+  #cheats button { background: #2d3038; color: inherit; border: 1px solid #454956; border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer; }
+  #cheaterr { color: #ff8a8a; font-size: 12px; white-space: pre-line; }
+  #cheathelp { color: #6d7280; font-size: 11px; }
   #pad { display: none; width: min(100vw, 480px); padding: 8px 16px calc(16px + env(safe-area-inset-bottom)); justify-content: space-between; align-items: center; gap: 8px; }
   @media (pointer: coarse), (max-width: 700px) { #pad { display: flex; } }
-  #dpad { display: grid; grid-template: repeat(3, 52px) / repeat(3, 52px); }
-  #dpad .b { border-radius: 8px; }
+  #dpad { display: grid; grid-template: repeat(3, 52px) / repeat(3, 52px); touch-action: none; border-radius: 50%; background: #2a2d36; }
+  #dpad .b { border-radius: 8px; pointer-events: none; }
   #ab { display: flex; gap: 14px; transform: rotate(-18deg); }
   #ab .b { width: 64px; height: 64px; border-radius: 50%; font-weight: 700; }
   #ss { display: flex; gap: 10px; width: 100%; justify-content: center; margin-top: 4px; }
@@ -55,12 +66,19 @@
   <button id="reset" disabled>Reset</button>
   <button id="savestate" disabled>Save state</button>
   <button id="loadstate" disabled>Load state</button>
+  <button id="cheatbtn" disabled>Cheats</button>
+  <button id="install" hidden>Install</button>
 </header>
 <main>
   <canvas id="screen" width="160" height="144"></canvas>
   <div id="hint">Drop a .gb / .gbc ROM here or use “Load ROM…”</div>
 </main>
 <div id="status">&nbsp;</div>
+<section id="cheats">
+  <textarea id="cheattext" spellcheck="false" autocomplete="off" placeholder="One code per line:&#10;Game Genie  ABC-DEF-GHI  or  ABC-DEF&#10;GameShark   01VVLLHH   (RAM A000-DFFF)&#10;# comments are ignored"></textarea>
+  <div class="row"><button id="cheatapply">Apply</button><button id="cheatclear">Clear</button><span id="cheathelp">Saved per ROM in this browser.</span></div>
+  <div id="cheaterr"></div>
+</section>
 <div id="pad">
   <div class="wrap">
     <div id="dpad">
@@ -73,6 +91,7 @@
   </div>
 </div>
 <footer>
+  gamepad supported · 
   <kbd>←↑↓→</kbd>/<kbd>WASD</kbd> d-pad · <kbd>X</kbd> A · <kbd>Z</kbd> B · <kbd>Enter</kbd> Start · <kbd>Backspace</kbd> Select · <kbd>P</kbd> pause · hold <kbd>Q</kbd> rewind
 </footer>
 <section id="about">
