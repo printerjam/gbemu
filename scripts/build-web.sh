@@ -11,11 +11,22 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-# Use the rustup toolchain (it has the wasm32 target) without touching the caller's PATH permanently.
-export PATH="$HOME/.cargo/bin:$PATH"
-export RUSTC="$HOME/.cargo/bin/rustc"
-command -v rustup >/dev/null || { echo "rustup not found; see the setup notes at the top of $0" >&2; exit 1; }
-command -v wasm-bindgen >/dev/null || { echo "wasm-bindgen not found; see the setup notes at the top of $0" >&2; exit 1; }
+# Locally rustup lives in ~/.cargo/bin, which is deliberately not on PATH (Homebrew's cargo is the default);
+# in CI rustup is already on PATH. Either way the build runs through `rustup run stable`, whose toolchain
+# has the wasm32 target.
+if ! command -v rustup >/dev/null && [ -x "$HOME/.cargo/bin/rustup" ]; then
+  export PATH="$HOME/.cargo/bin:$PATH"
+fi
+if ! command -v rustup >/dev/null; then
+  echo "rustup not found; see the setup notes at the top of $0" >&2
+  exit 1
+fi
+if ! command -v wasm-bindgen >/dev/null; then
+  if [ -x "$HOME/.cargo/bin/wasm-bindgen" ]; then export PATH="$HOME/.cargo/bin:$PATH"; else
+    echo "wasm-bindgen not found; see the setup notes at the top of $0" >&2
+    exit 1
+  fi
+fi
 
 want=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')
 have=$(wasm-bindgen --version | awk '{print $2}')

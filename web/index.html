@@ -33,6 +33,8 @@
   .b.on { background: #6aa0ff; color: #000; }
   .wrap { display: flex; flex-wrap: wrap; width: 100%; justify-content: space-between; }
   footer { font-size: 12px; color: #6d7280; padding: 8px; text-align: center; }
+  #about { max-width: 640px; padding: 4px 16px 24px; font-size: 12px; color: #8a8f9c; text-align: center; }
+  #about a { color: #8ab4ff; }
   kbd { background: #2d3038; border: 1px solid #454956; border-radius: 4px; padding: 0 4px; font-size: 11px; }
 </style>
 </head>
@@ -68,6 +70,14 @@
 <footer>
   <kbd>←↑↓→</kbd>/<kbd>WASD</kbd> d-pad · <kbd>X</kbd> A · <kbd>Z</kbd> B · <kbd>Enter</kbd> Start · <kbd>Backspace</kbd> Select · <kbd>P</kbd> pause
 </footer>
+<section id="about">
+  <strong>gbemu</strong> is a Game Boy (DMG) emulator written from scratch in Rust, compiled to WebAssembly &mdash;
+  source on <a href="https://github.com/printerjam/gbemu" target="_blank" rel="noopener">GitHub</a>.
+  No games are included or uploaded anywhere: ROMs are loaded and run locally in your browser. Bring your own
+  homebrew &mdash; there are plenty of free games on <a href="https://hh.gbdev.io/" target="_blank" rel="noopener">Homebrew Hub</a>
+  (hh.gbdev.io) and <a href="https://itch.io/games/tag-game-boy" target="_blank" rel="noopener">itch.io</a>.
+  Battery saves and save states stay in this browser's local storage.
+</section>
 <script type="module" src="main.js"></script>
 </body>
 </html>

@@ -107,6 +107,10 @@ touch pad, AudioWorklet output (ScriptProcessor fallback on insecure origins), 5
 battery saves and save states in `localStorage` keyed by `title:fnv1a(rom)`, palette select. AudioWorklet needs
 a secure context (`localhost` counts).
 
+`.github/workflows/pages.yml` publishes `web/` to GitHub Pages on every push to `main`: stable toolchain +
+wasm32 target, `wasm-bindgen-cli` installed at the version read from `Cargo.lock` (cached), then the same
+`scripts/build-web.sh`. In the repo settings, Pages source must be set to "GitHub Actions".
+
 ## Workflow
 
 - Coordinator plans, integrates, verifies; subsystems delegated to subagents.
