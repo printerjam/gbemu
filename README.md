@@ -4,7 +4,7 @@ A Game Boy / Game Boy Color emulator written from scratch in Rust, with no emula
 with dot-accurate mode timing, four-channel APU, timer, serial, joypad, MBC1/2/3(RTC)/5, save states and rewind.
 `gb-core` has no I/O (its only dependencies are `serde` and `bincode`, for save states), so the same core drives a
 desktop window, a terminal, a TUI debugger, a headless test runner and a WebAssembly build.
-It passes 150 of 152 scored test ROMs (blargg, mooneye, acid2, CGB, MBC suites) and plays real homebrew.
+It passes all 152 scored test ROMs (blargg, mooneye, acid2, CGB, MBC suites) and plays real homebrew.
 
 **Try it in the browser: <https://printerjam.github.io/gbemu/>** (bring your own ROM; nothing is uploaded).
 
@@ -46,13 +46,14 @@ Screenshot credits (no ROMs are included in this repository):
 | Suite | Passed | Total |
 |---|---|---|
 | blargg | 19 | 19 |
-| mooneye | 64 | 66 |
+| mooneye | 66 | 66 |
 | mooneye-mbc | 28 | 28 |
 | acid2 | 1 | 1 |
 | cgb | 34 | 34 |
 | mbc3 | 4 | 4 |
-| **Score** | **150** | **152** |
+| **Score** | **152** | **152** |
 
+Beyond the scored suites, `scripts/scoreboard.sh` tracks 6161 ROMs from the wider collection (gambatte, gbmicrotest, mealybug, age, same-suite, wilbertpol...), currently 3513 passing.
 Live numbers and milestone evidence are in [`PROGRESS.md`](PROGRESS.md); architecture and contracts in
 [`PLAN.md`](PLAN.md).
 
