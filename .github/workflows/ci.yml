@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages for gb-desktop (ALSA, X11, xkbcommon)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libx11-dev libxkbcommon-dev libxcursor-dev libxi-dev libxrandr-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --workspace
+
+      - name: Cache test ROMs
+        id: roms
+        uses: actions/cache@v4
+        with:
+          path: roms
+          key: test-roms-v7.0-${{ hashFiles('scripts/fetch-roms.sh') }}
+
+      - name: Fetch test ROMs
+        if: steps.roms.outputs.cache-hit != 'true'
+        run: scripts/fetch-roms.sh
+
+      - name: Scoreboard (fails on regression vs baseline)
+        run: scripts/scoreboard.sh
+
+      - name: Scoreboard summary
+        if: always()
+        run: |
+          {
+            echo "## Test ROM scoreboard"
+            target/release/gbtest --roms roms --suite blargg --suite blargg-extra --suite mooneye --suite mooneye-mbc --suite acid2 --suite mbc3 --markdown
+          } >> "$GITHUB_STEP_SUMMARY"
